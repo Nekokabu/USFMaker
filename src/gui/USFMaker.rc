@@ -1,0 +1,71 @@
+// USF Maker - resources.
+// All visible text is set from code (see strings in main.cpp) so that this
+// file stays plain ASCII and builds the same with rc.exe and windres.
+#include <windows.h>
+#include "resource.h"
+
+IDI_APP ICON "USFMaker.ico"
+
+// Application manifest (common controls 6, DPI awareness).  It is embedded
+// here for every build system; the Visual Studio project therefore has
+// "Generate Manifest" switched off.
+1 24 "USFMaker.manifest"
+
+IDD_SETTINGS DIALOGEX 0, 0, 270, 252
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Settings"
+FONT 9, "Segoe UI", 0, 0, 0x1
+BEGIN
+    GROUPBOX        "Emulation", IDC_SET_GROUP_EMU, 7, 7, 256, 74
+    AUTOCHECKBOX    "Expansion Pak (8 MB)", IDC_SET_EXPANSION, 15, 20, 240, 10
+    LTEXT           "Idle seconds", IDC_SET_IDLE_LABEL, 15, 37, 170, 8
+    EDITTEXT        IDC_SET_IDLE, 195, 35, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "Threads", IDC_SET_THREADS_LABEL, 15, 52, 170, 8
+    EDITTEXT        IDC_SET_THREADS, 195, 50, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "Seed", IDC_SET_SEED_LABEL, 15, 67, 170, 8
+    EDITTEXT        IDC_SET_SEED, 195, 65, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+
+    GROUPBOX        "Songs", IDC_SET_GROUP_SONG, 7, 86, 256, 90
+    LTEXT           "Loops", IDC_SET_LOOPS_LABEL, 15, 101, 170, 8
+    EDITTEXT        IDC_SET_LOOPS, 195, 99, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "Fade", IDC_SET_FADE_LABEL, 15, 117, 170, 8
+    EDITTEXT        IDC_SET_FADE, 195, 115, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "Default length", IDC_SET_DEFLEN_LABEL, 15, 133, 170, 8
+    EDITTEXT        IDC_SET_DEFLEN, 195, 131, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "Max analysis", IDC_SET_MAXLEN_LABEL, 15, 149, 170, 16
+    EDITTEXT        IDC_SET_MAXLEN, 195, 147, 50, 12, ES_NUMBER | ES_AUTOHSCROLL
+
+    GROUPBOX        "Output", IDC_SET_GROUP_OUT, 7, 181, 256, 40
+    AUTOCHECKBOX    "Full ROM", IDC_SET_FULLROM, 15, 194, 240, 20, BS_MULTILINE | BS_TOP
+
+    DEFPUSHBUTTON   "OK", IDOK, 153, 231, 52, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 211, 231, 52, 14
+END
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", "USF Maker"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "USFMaker"
+            VALUE "LegalCopyright", "GPL-2.0-or-later"
+            VALUE "OriginalFilename", "USFMaker.exe"
+            VALUE "ProductName", "USF Maker"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,0 +1,17 @@
+# All sources are UTF-8 (the projects compile with /utf-8).
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+
+[*.{c,h,cpp,def,rc,mk}]
+indent_style = space
+indent_size = 4
+
+[*.{sln,vcxproj,filters}]
+charset = utf-8-bom
+end_of_line = crlf
+
+[Makefile]
+indent_style = tab

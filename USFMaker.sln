@@ -1,0 +1,54 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.0.11205.157
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "USFMaker", "src\gui\USFMaker.vcxproj", "{D083B0BC-4C53-5BDF-80D7-77F941595392}"
+	ProjectSection(ProjectDependencies) = postProject
+		{D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D} = {D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D}
+		{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C} = {1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "usfmaker-cli", "src\cli\usfmaker-cli.vcxproj", "{E497E0C1-DD2D-5A69-B715-DDA053EC6378}"
+	ProjectSection(ProjectDependencies) = postProject
+		{D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D} = {D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D}
+		{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C} = {1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "usfengine", "src\engine\usfengine.vcxproj", "{D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D}"
+	ProjectSection(ProjectDependencies) = postProject
+		{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C} = {1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "lazyusf2", "src\lazyusf2\lazyusf2.vcxproj", "{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{D083B0BC-4C53-5BDF-80D7-77F941595392}.Debug|x64.ActiveCfg = Debug|x64
+		{D083B0BC-4C53-5BDF-80D7-77F941595392}.Debug|x64.Build.0 = Debug|x64
+		{D083B0BC-4C53-5BDF-80D7-77F941595392}.Release|x64.ActiveCfg = Release|x64
+		{D083B0BC-4C53-5BDF-80D7-77F941595392}.Release|x64.Build.0 = Release|x64
+		{E497E0C1-DD2D-5A69-B715-DDA053EC6378}.Debug|x64.ActiveCfg = Debug|x64
+		{E497E0C1-DD2D-5A69-B715-DDA053EC6378}.Debug|x64.Build.0 = Debug|x64
+		{E497E0C1-DD2D-5A69-B715-DDA053EC6378}.Release|x64.ActiveCfg = Release|x64
+		{E497E0C1-DD2D-5A69-B715-DDA053EC6378}.Release|x64.Build.0 = Release|x64
+		{D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D}.Debug|x64.ActiveCfg = Debug|x64
+		{D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D}.Debug|x64.Build.0 = Debug|x64
+		{D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D}.Release|x64.ActiveCfg = Release|x64
+		{D33E62FF-F6D8-5C99-B30D-B6F9E8B8776D}.Release|x64.Build.0 = Release|x64
+		{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}.Debug|x64.ActiveCfg = Debug|x64
+		{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}.Debug|x64.Build.0 = Debug|x64
+		{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}.Release|x64.ActiveCfg = Release|x64
+		{1074DECA-D4D5-5B5E-A37B-79A95F69CB8C}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {50A8C5DD-877A-570A-9BE9-41541E1FE17C}
+	EndGlobalSection
+EndGlobal

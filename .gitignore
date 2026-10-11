@@ -1,0 +1,12 @@
+# build output
+/bin/
+/obj/
+/build/
+/build-*/
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+ipch/
