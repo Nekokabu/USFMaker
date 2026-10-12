@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cwchar>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -91,11 +92,32 @@ std::wstring rom_name_text(const std::string& raw)
     return widen(raw, high ? 932 : CP_UTF8);
 }
 
+// The engine names controller keys in English; say them the usual way in
+// the Japanese interface.
+std::wstring keys_text(const std::string& keys)
+{
+    std::wstring s = widen(keys);
+    if (!is_japanese())
+        return s;
+    static const struct { const wchar_t* en; const wchar_t* ja; } names[] = {
+        { L", then ", L" → " },
+        { L"D-Pad Right", L"十字キー右" }, { L"D-Pad Down", L"十字キー下" }, { L"D-Pad Left", L"十字キー左" }, { L"D-Pad Up", L"十字キー上" },
+        { L"Stick Right", L"スティック右" }, { L"Stick Down", L"スティック下" },
+        { L"C Right", L"C 右" }, { L"C Down", L"C 下" }, { L"START", L"スタート" },
+    };
+    for (const auto& n : names) {
+        const std::wstring en = n.en;
+        for (size_t at = s.find(en); at != std::wstring::npos; at = s.find(en, at))
+            s.replace(at, en.size(), n.ja), at += std::wcslen(n.ja);
+    }
+    return s;
+}
+
 // ------------------------------------------------------------ identifiers
 enum : int {
     IDC_ROM_LABEL = 2000, IDC_ROM_EDIT, IDC_ROM_OPEN, IDC_ROM_INFO,
     IDC_GAME_LABEL, IDC_GAME_EDIT, IDC_ARTIST_LABEL, IDC_ARTIST_EDIT,
-    IDC_TIME_LABEL, IDC_TIME_COMBO, IDC_PRESS, IDC_SETTINGS,
+    IDC_TIME_LABEL, IDC_TIME_COMBO, IDC_PRESS, IDC_SETTINGS, IDC_SOUNDTEST,
     IDC_START, IDC_STOP, IDC_PROGRESS, IDC_STATUS,
     IDC_LIST,
     IDC_PLAY, IDC_RENAME, IDC_DELETE, IDC_SELALL, IDC_IMPORT, IDC_SAVE, IDC_HELPBTN,
@@ -143,6 +165,8 @@ struct App {
     Path rom_path;
     std::unique_ptr<Ripper> ripper;
     UiListener listener;
+    bool start_soundtest = false;        // /soundtest: start with the sound test box ticked
+    std::map<int, int> order_by_id;      // SongInfo::order of every row
     RipOptions opt;
     bool full_rom = false;
 
@@ -247,6 +271,8 @@ void list_fill_row(int row, const SongInfo& s)
     list_set(row, 3, s.kind == SongKind::Looping ? fmt(L"%.2f + %.2f", s.intro_seconds, s.loop_seconds) : std::wstring());
     if (s.origin == SongOrigin::Imported)
         list_set(row, 4, T(S_ORIGIN_IMPORT));
+    else if (s.origin == SongOrigin::SoundTest)
+        list_set(row, 4, fmt(T(S_ORIGIN_SOUNDTEST), s.order + 1));
     else
         list_set(row, 4, fmt(T(s.origin == SongOrigin::BootIdle ? S_ORIGIN_IDLE : S_ORIGIN_EXPLORED), time_text(s.found_at_seconds).c_str()));
     list_set(row, 5, fmt(L"%u Hz", s.sample_rate));
@@ -265,9 +291,18 @@ void list_add(const SongInfo& s)
 {
     HWND lv = ctl(IDC_LIST);
     const std::wstring title = widen(s.title);
+    // keep the list in song order (sound test entries arrive out of order)
+    g.order_by_id[s.id] = s.order;
+    int at = ListView_GetItemCount(lv);
+    while (at > 0) {
+        const auto o = g.order_by_id.find(list_id_at(at - 1));
+        if (o == g.order_by_id.end() || o->second <= s.order)
+            break;
+        --at;
+    }
     LVITEMW it = {};
     it.mask = LVIF_TEXT | LVIF_PARAM;
-    it.iItem = ListView_GetItemCount(lv);
+    it.iItem = at;
     it.pszText = const_cast<wchar_t*>(title.c_str());
     it.lParam = (LPARAM)s.id;
     const int row = ListView_InsertItem(lv, &it);
@@ -300,6 +335,7 @@ void update_buttons()
     EnableWindow(ctl(IDC_STOP), g.ripping && !g.stopping);
     EnableWindow(ctl(IDC_TIME_COMBO), !busy);
     EnableWindow(ctl(IDC_PRESS), !busy);
+    EnableWindow(ctl(IDC_SOUNDTEST), !busy);
     EnableWindow(ctl(IDC_SETTINGS), !busy);
     EnableWindow(ctl(IDC_PLAY), sel || g.player.playing());
     EnableWindow(ctl(IDC_RENAME), sel);
@@ -342,6 +378,7 @@ bool load_rom(const std::wstring& path)
     g.ripper->set_rom(rom);
     g.ripper->set_listener(&g.listener);
     ListView_DeleteAllItems(ctl(IDC_LIST));
+    g.order_by_id.clear();
 
     const RomInfo& ri = rom->info();
     SetWindowTextW(ctl(IDC_ROM_EDIT), path.c_str());
@@ -443,7 +480,11 @@ void on_progress(const RipProgress& p)
         const int pos = (int)std::min(1000.0, p.elapsed_seconds * 1000.0 / p.budget_seconds);
         SendMessageW(ctl(IDC_PROGRESS), PBM_SETPOS, pos, 0);
     }
-    if (g.stopping || (!p.exploring && !p.finished)) {
+    if (p.st_phase == 1 && !g.stopping) {
+        set_status(T(S_STATUS_ST_PROBE));
+    } else if (p.st_phase == 2 && !g.stopping) {
+        set_status(fmt(T(S_STATUS_ST_WALK), p.st_entry, keys_text(p.st_keys).c_str(), p.songs, p.pending));
+    } else if (g.stopping || (!p.exploring && !p.finished)) {
         set_status(T(S_STATUS_FINISHING));
     } else if (p.budget_seconds > 0) {
         set_status(fmt(T(S_STATUS_RUNNING), time_text(std::min(p.elapsed_seconds, p.budget_seconds)).c_str(), time_text(p.budget_seconds).c_str(),
@@ -537,10 +578,61 @@ void save_set()
 }
 
 // ----------------------------------------------------------- save states
+// Sound test mode: every state is a sound test screen whose entries are
+// played one after the other.  Runs like a search (and is stopped like one).
+void start_sound_test(const std::vector<std::wstring>& files)
+{
+    stop_playback();
+    read_options_from_ui();
+    g.ripper->set_options(g.opt);
+    if (g.rip_thread.joinable())
+        g.rip_thread.join();
+    g.ripping = true;
+    g.stopping = false;
+    progress_marquee(true);
+    update_buttons();
+
+    HWND wnd = g.wnd;
+    Ripper* ripper = g.ripper.get();
+    g.rip_thread = std::thread([wnd, ripper, files] {
+        for (const std::wstring& f : files) {
+            const Path p(f);
+            const std::wstring name = p.filename().wstring();
+            PostMessageW(wnd, WM_APP_LOG, 0, (LPARAM) new std::wstring(fmt(T(S_LOG_ST_START), name.c_str())));
+            Bytes state;
+            std::string err, note;
+            if (!load_pj64_state(p, state, err, &note)) {
+                PostMessageW(wnd, WM_APP_LOG, 0, (LPARAM) new std::wstring(fmt(T(S_ERR_STATE), name.c_str(), widen(err).c_str())));
+                continue;
+            }
+            if (!note.empty())
+                PostMessageW(wnd, WM_APP_LOG, 0, (LPARAM) new std::wstring(fmt(T(S_LOG_STATE_CONVERTED), name.c_str())));
+            SoundTestResult res;
+            const bool ok = ripper->run_sound_test(state, res, err);
+            if (res.cancelled)
+                break;
+            if (ok) {
+                PostMessageW(wnd, WM_APP_LOG, 0,
+                             (LPARAM) new std::wstring(fmt(T(S_LOG_ST_KEYS), keys_text(res.keys).c_str(), res.entries, res.sounds)));
+            } else {
+                // not a sound test after all: use it the ordinary way
+                PostMessageW(wnd, WM_APP_LOG, 0, (LPARAM) new std::wstring(fmt(T(S_LOG_ST_FAILED), name.c_str())));
+                if (!ripper->add_from_state(state, state_title_from_path(p), nullptr, err))
+                    PostMessageW(wnd, WM_APP_LOG, 0, (LPARAM) new std::wstring(fmt(T(S_ERR_STATE), name.c_str(), widen(err).c_str())));
+            }
+        }
+        PostMessageW(wnd, WM_APP_RIP_DONE, 0, 0);
+    });
+}
+
 void import_states(const std::vector<std::wstring>& files)
 {
     if (!g.rom || g.ripping || g.importing || files.empty())
         return;
+    if (SendMessageW(ctl(IDC_SOUNDTEST), BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        start_sound_test(files);
+        return;
+    }
     stop_playback();
     if (g.task_thread.joinable())
         g.task_thread.join();
@@ -828,7 +920,13 @@ void layout()
     const int settings_w = S(120);
     place(IDC_TIME_LABEL, m, y + S(4), lab, rh);
     place(IDC_TIME_COMBO, m + lab, y, S(140), rh * 8);
-    place(IDC_PRESS, m + lab + S(140) + S(16), y + S(2), W - (m + lab + S(140) + S(16)) - settings_w - m - gap, rh - S(2));
+    {
+        const int x0 = m + lab + S(140) + S(16);
+        const int room = W - x0 - settings_w - m - gap;
+        const int press_w = std::min(S(230), room);
+        place(IDC_PRESS, x0, y + S(2), press_w, rh - S(2));
+        place(IDC_SOUNDTEST, x0 + press_w + S(12), y + S(2), room - press_w - S(12), rh - S(2));
+    }
     place(IDC_SETTINGS, W - m - settings_w, y - S(1), settings_w, rh + S(2));
     y += rh + gap + S(2);
 
@@ -916,6 +1014,9 @@ void create_controls()
     SendMessageW(combo, CB_SETCURSEL, 2, 0);
     HWND press = make(L"BUTTON", T(S_PRESS_BUTTONS), BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_PRESS);
     SendMessageW(press, BM_SETCHECK, BST_CHECKED, 0);
+    HWND st = make(L"BUTTON", T(S_SOUNDTEST_CHECK), BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_SOUNDTEST);
+    if (g.start_soundtest)
+        SendMessageW(st, BM_SETCHECK, BST_CHECKED, 0);
     make(L"BUTTON", T(S_SETTINGS), BS_PUSHBUTTON | WS_TABSTOP, 0, IDC_SETTINGS);
 
     make(L"BUTTON", T(S_START), BS_DEFPUSHBUTTON | WS_TABSTOP, 0, IDC_START);
@@ -1174,6 +1275,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
         for (int i = 1; argv && i < argc; i++) {
             const std::wstring a = argv[i];
             if (a == L"/verbose" || a == L"--verbose") g.listener.verbose = true;
+            else if (a == L"/soundtest" || a == L"--soundtest") g.start_soundtest = true;
             else if (a == L"/lang:ja" || a == L"--lang=ja") japanese = 1;
             else if (a == L"/lang:en" || a == L"--lang=en") japanese = 0;
             else if ((a == L"/auto" || a == L"--auto") && i + 3 < argc) {

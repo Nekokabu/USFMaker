@@ -544,4 +544,26 @@ MatchResult find_in(const FeatureTrack& probe, double probe_start, double probe_
     return r;
 }
 
+double similarity(const FeatureTrack& a, const FeatureTrack& b, double seconds)
+{
+    const size_t want = (size_t)(seconds * kFeatRate);
+    double best = 0;
+    for (long shift = -8; shift <= 8; shift++) {
+        // frame i of `a` against frame i + shift of `b`
+        const size_t a0 = shift < 0 ? (size_t)(-shift) : 0;
+        const size_t b0 = shift > 0 ? (size_t)shift : 0;
+        if (a0 >= a.frames() || b0 >= b.frames())
+            continue;
+        const size_t n = std::min(want, std::min(a.frames() - a0, b.frames() - b0));
+        if (n < (size_t)kFeatRate / 2)
+            continue;
+        size_t hit = 0;
+        for (size_t i = 0; i < n; i++)
+            if (fine_match(a, a0 + i, b, b0 + i))
+                ++hit;
+        best = std::max(best, (double)hit / (double)n);
+    }
+    return best;
+}
+
 } // namespace usfm

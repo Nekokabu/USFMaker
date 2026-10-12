@@ -62,9 +62,17 @@ enum StrId {
     S_LOG_REPLACED,          // title
     S_LOG_STATE_CONVERTED,   // file name
     S_ERR_NEED_ROM,
+    S_SOUNDTEST_CHECK,
+    S_STATUS_ST_PROBE,
+    S_STATUS_ST_WALK,        // entry, keys, songs, waiting
+    S_LOG_ST_START,          // file
+    S_LOG_ST_KEYS,           // keys, entries tried, entries with a new sound
+    S_LOG_ST_FAILED,         // file
+    S_ORIGIN_SOUNDTEST,      // entry number
     S_COUNT
 };
 
 // Selects the language: 1 = Japanese, 0 = English.
 void set_language(int japanese);
 const wchar_t* T(StrId id);
+bool is_japanese();

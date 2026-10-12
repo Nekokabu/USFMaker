@@ -114,6 +114,11 @@ const Entry kText[S_COUNT] = {
         L"自動操作でたどり着けない場面の曲は見つけられません。その場合は Project64 で目的の曲が鳴り始める直前にセーブステートを作り、"
         L"[セーブステートから追加] で読み込んでください（.pj / .pj.zip に対応。ステートファイルのドロップでも可）。\n"
         L"\n"
+        L"【サウンドテストがあるゲーム】\n"
+        L"ゲーム内にサウンドテスト（曲を選んで聴ける画面）がある場合は、その画面で Project64 のセーブステートを作り、"
+        L"「ステートはサウンドテスト画面」にチェックを入れてから読み込んでください。曲を切り替えるボタンと再生するボタンを自動で探し、"
+        L"一覧の曲を順番に再生して取り込みます。\n"
+        L"\n"
         L"【再生について】\n"
         L"作成したファイルは foobar2000 (foo_input_usf) などの lazyusf2 系プレイヤーで再生できます。\n"
         L"\n"
@@ -130,6 +135,11 @@ const Entry kText[S_COUNT] = {
         L"Music in places the automatic player can not reach is not found. In that case make a save state in Project64 just before the tune starts "
         L"and load it with Add from save state (.pj and .pj.zip; dropping the state file works too).\n"
         L"\n"
+        L"Games with a sound test\n"
+        L"If the game has a sound test (a screen where tunes can be selected and played), make a Project64 save state on that screen, "
+        L"tick \"Save states are sound test screens\" and load the state. The keys that select and play a tune are found automatically "
+        L"and every entry is played and captured in turn.\n"
+        L"\n"
         L"Playback\n"
         L"The files play in lazyusf2 based players such as foobar2000 with foo_input_usf.\n"
         L"\n"
@@ -141,6 +151,17 @@ const Entry kText[S_COUNT] = {
     /* S_LOG_STATE_CONVERTED */ { L"%ls: 新しい Project64 のステート形式から変換しました。", L"%ls: converted from the newer Project64 save state layout." },
     /* S_ERR_NEED_ROM */ { L"このファイルは N64 の ROM として読み込めませんでした。\nセーブステートを追加する場合は、先にそのゲームの ROM を開いてください。",
                            L"This file could not be read as an N64 ROM.\nTo add save states, open the game's ROM first." },
+    /* S_SOUNDTEST_CHECK */ { L"ステートはサウンドテスト画面（全曲を自動で取り込む）", L"Save states are sound test screens (capture every entry)" },
+    /* S_STATUS_ST_PROBE */ { L"サウンドテスト画面の操作方法を調べています…（どのボタンで曲が切り替わり、再生されるか）",
+                              L"Finding out how the sound test screen is operated..." },
+    /* S_STATUS_ST_WALK */ { L"サウンドテストを巡回中: %d 項目め（操作: %ls）― 曲 %d、解析待ち %d",
+                             L"Walking the sound test: entry %d (keys: %ls) - songs %d, waiting %d" },
+    /* S_LOG_ST_START */ { L"サウンドテスト画面のステートとして読み込みます: %ls", L"Treating as a sound test screen: %ls" },
+    /* S_LOG_ST_KEYS */ { L"操作方法: %ls ― %d 項目を試し、%d 項目を曲の候補として解析しました（同じ曲や短い効果音は一覧に入りません）。",
+                          L"Keys: %ls - %d entries tried, %d analysed as possible songs (repeats and short sound effects are left out)." },
+    /* S_LOG_ST_FAILED */ { L"%ls: サウンドテスト画面として操作できませんでした（曲を切り替えて再生するボタンが見つかりません）。通常のステートとして追加します。",
+                            L"%ls: could not operate this as a sound test screen (no key found that selects and plays another tune). Adding it as an ordinary save state." },
+    /* S_ORIGIN_SOUNDTEST */ { L"サウンドテスト %d 項目め", L"Sound test, entry %d" },
 };
 
 } // namespace
@@ -148,6 +169,11 @@ const Entry kText[S_COUNT] = {
 void set_language(int japanese)
 {
     g_japanese = japanese ? 1 : 0;
+}
+
+bool is_japanese()
+{
+    return g_japanese != 0;
 }
 
 const wchar_t* T(StrId id)

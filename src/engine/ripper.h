@@ -63,6 +63,7 @@ enum class SongOrigin {
     BootIdle,   // heard without touching the controller
     Explored,   // heard while the automatic player was pressing buttons
     Imported,   // made from a save state the user supplied
+    SoundTest,  // played by walking through the game's sound test screen
 };
 
 struct SongInfo {
@@ -79,6 +80,7 @@ struct SongInfo {
     size_t state_bytes = 0;
     bool hle_ok = true;                   // false: uses audio microcode the fast (HLE) path does not know
     bool stalls = false;                  // the game stops producing sound after the tagged length
+    int order = 0;                        // position in the list (sound test entries come in menu order)
 };
 
 struct RipProgress {
@@ -92,6 +94,18 @@ struct RipProgress {
     int pending = 0;                      // candidates waiting for analysis
     bool exploring = false;
     bool finished = false;
+    // sound test walk (run_sound_test)
+    int st_phase = 0;                     // 0 not running, 1 finding out the controls, 2 walking the list
+    int st_entry = 0;                     // entry being tried (1 = the one selected in the save state)
+    std::string st_keys;                  // controls in use, e.g. "D-Pad Right, then A"
+};
+
+struct SoundTestResult {
+    bool controls_found = false;
+    bool cancelled = false;
+    std::string keys;                     // "<select>, then <play>"
+    int entries = 0;                      // entries tried
+    int sounds = 0;                       // entries that produced a new sound
 };
 
 struct SetTags {
@@ -148,6 +162,16 @@ public:
     // Makes a song out of a Project64 save state taken while the wanted music
     // was starting.  Runs the same checks and analysis as an automatic find.
     bool add_from_state(const Bytes& pj64_state, const std::string& title, int* new_id, std::string& err);
+
+    // "Sound test" mode.  `pj64_state` is a save state taken on the game's
+    // sound test / music player screen.  The controls are found out by
+    // trying (which button moves to the next entry, which one plays it),
+    // then the list is walked entry by entry and everything that starts to
+    // play becomes a song, in menu order.  Blocks until the end of the list
+    // (it wraps around or stops moving) or cancel(); run it on its own
+    // thread like run().  Returns false with `err` set when nothing could be
+    // done; result.controls_found tells whether the screen reacted at all.
+    bool run_sound_test(const Bytes& pj64_state, SoundTestResult& result, std::string& err);
 
     // Sets `m` up to play song `id` the way a USF player would.
     bool open_player(int id, Machine& m, std::string& err) const;

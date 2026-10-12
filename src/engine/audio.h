@@ -116,4 +116,11 @@ struct MatchResult {
 MatchResult find_in(const FeatureTrack& probe, double probe_start, double probe_seconds,
                     const FeatureTrack& ref, double ref_limit_seconds);
 
+// How alike two recordings are when laid on top of each other from their
+// starts (a few hundredths of a second of slack either way): the fraction of
+// frames that match, 0..1, over at most `seconds`.  Frames where both are
+// silent count as matching.  Unlike find_in() this also works for short
+// sounds and for recordings that are mostly silence.
+double similarity(const FeatureTrack& a, const FeatureTrack& b, double seconds);
+
 } // namespace usfm

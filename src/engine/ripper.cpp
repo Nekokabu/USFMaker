@@ -249,8 +249,9 @@ struct Candidate {
     std::shared_ptr<const Bytes> cart;
     double game_time = 0;
     SongOrigin origin = SongOrigin::BootIdle;
-    std::string title;            // only for imported states
+    std::string title;            // given by the user or by the sound test walk; empty: number it
     int chain = 0;                // how many "what comes next" steps led here
+    int order = -1;               // position in the song list; -1: append
 };
 
 // "Keep listening from this state": used when a song is followed by more
@@ -271,6 +272,7 @@ struct SongRec {
     FeatureTrack features;
     double first_sound = 0;
     double probe_seconds = 10;
+    bool auto_title = true;                // still called "Track NN" after the order it was found in
 };
 
 struct InProgress {
@@ -336,6 +338,45 @@ size_t popcount_new(const uint8_t* local, uint8_t* global, size_t bytes)
     return n;
 }
 
+// ---- sound test walk ------------------------------------------------------
+struct StKey {
+    uint32_t buttons;
+    const char* name;
+};
+
+// How a sound test screen is operated: one key moves to the next entry and
+// one starts it.  play.buttons == 0 means that moving to an entry plays it.
+struct StScheme {
+    StKey change;
+    StKey play;
+};
+
+struct StStep {
+    bool reacted = false;      // the key press changed what is heard
+    bool captured = false;     // ... and a save state was found that plays the new sound by itself
+    Bytes state;
+    FeatureTrack print;        // the first seconds of the new sound
+};
+
+class PcmSink : public AudioSink {
+public:
+    std::vector<int16_t> pcm;  // interleaved
+    uint32_t rate = 0;
+    void on_audio(const int16_t* stereo, size_t frames, uint32_t r) override
+    {
+        rate = r;
+        pcm.insert(pcm.end(), stereo, stereo + frames * 2);
+    }
+    size_t frames() const { return pcm.size() / 2; }
+};
+
+const int kStHold = 5;             // video frames a key is held
+const int kStSettle = 24;          // frames to let a cursor movement finish
+const double kStWindow = 2.0;      // seconds to wait for a key press to become audible
+const double kStListen = 3.0;      // seconds of the new sound to record
+const double kStSame = 0.80;       // similarity above which two entries are the same sound
+const int kStMaxEntries = 600;
+
 const double kOnsetGap = 0.25;        // silence after which new sound is looked at as a possible new song
 const double kEndGap = 0.6;           // silence that ends a song (unless it turns out to be part of a loop)
 const double kSilentSnapEvery = 1.0 / 15;
@@ -367,6 +408,8 @@ struct Ripper::Impl {
     bool stop_workers = false;
     bool idle_boot_done = false;
     bool idle_boot_taken = false;
+    bool st_mode = false;          // a sound test walk is running: workers only analyse what it queues
+    bool st_walking = false;       // ... and it may still queue more
     int next_song_id = 1;
     int next_node_id = 1;
     uint64_t job_counter = 0;
@@ -498,6 +541,18 @@ struct Ripper::Impl {
 
     void worker(int index);
     void emit_progress(bool finished);
+
+    // sound test walk
+    MachineConfig st_config() const
+    {
+        MachineConfig c = capture_config();
+        c.track_rom = false;
+        return c;
+    }
+    bool st_frames(Machine& m, int frames, uint32_t buttons);
+    bool st_advance(const Bytes& cursor, uint32_t key, Bytes& next);
+    bool st_step(const StScheme& scheme, Bytes& cursor, int index, StStep& out);
+    int st_probe(const StScheme& scheme, const Bytes& root);
 };
 
 void Ripper::Impl::logf(const char* fmt, ...)
@@ -987,7 +1042,7 @@ Ripper::Impl::Verdict Ripper::Impl::finalize(const Candidate& cand, int* new_id,
     // Something else starts after this song: have an exploration run wait
     // for it (pressing nothing), so that it gets its own save state.
     double follow_at = -1;
-    if (cand.origin != SongOrigin::Imported && cand.chain < 16) {
+    if (cand.origin != SongOrigin::Imported && cand.origin != SongOrigin::SoundTest && cand.chain < 16) {
         const EndResult end = find_end(tr, kEndGap);
         if (end.found && end.resume_seconds >= 0 && info.kind == SongKind::Ending && end.resume_seconds < opt.max_render_seconds)
             follow_at = end.resume_seconds;
@@ -1018,6 +1073,8 @@ Ripper::Impl::Verdict Ripper::Impl::finalize(const Candidate& cand, int* new_id,
             }
         }
         info.id = next_song_id++;
+        info.order = cand.order >= 0 ? cand.order : 1000000 + info.id;
+        rec->auto_title = cand.title.empty();
         if (!cand.title.empty()) {
             info.title = cand.title;
         } else {
@@ -1073,7 +1130,7 @@ void Ripper::Impl::worker(int index)
                     do_finalize = true;
                     break;
                 }
-                const bool may_explore = !cancel.load() && !budget_over() && (int)songs.size() < opt.max_songs;
+                const bool may_explore = !st_mode && !cancel.load() && !budget_over() && (int)songs.size() < opt.max_songs;
                 if (!may_explore)
                     listen_queue.clear();
                 if (!listen_queue.empty()) {
@@ -1094,7 +1151,7 @@ void Ripper::Impl::worker(int index)
                     if (node)
                         break;
                 }
-                if (active == 0) {
+                if (active == 0 && !(st_mode && st_walking)) {
                     // nothing queued, nothing running, nothing left to start
                     stop_workers = true;
                     cv.notify_all();
@@ -1199,6 +1256,483 @@ RipProgress Ripper::progress() const
     return p;
 }
 
+// --------------------------------------------------------------------------
+// Sound test walk.
+//
+// The save state sits on a screen where one key selects the next tune and
+// another one plays it.  Which keys those are is found by trying.  Whether a
+// key press did anything is decided by running the same state twice, once
+// with and once without the press: emulation is deterministic, so the two
+// recordings are identical sample for sample up to the moment the press
+// becomes audible.  That works no matter what is playing at the time, where
+// "wait for silence, then for sound" would not.
+// --------------------------------------------------------------------------
+// A save state can not hold an audio buffer that is queued behind the one
+// being played.  The exploration avoids that by only taking states while it
+// is quiet; here music may be playing all the time, and dropping a sixtieth
+// of a second of the *previous* tune is harmless.
+static bool st_can_snapshot(Machine& m)
+{
+    return (m.busy() & ~kBusyAIFull) == 0;
+}
+
+bool Ripper::Impl::st_frames(Machine& m, int frames, uint32_t buttons)
+{
+    for (int i = 0; i < frames; i++) {
+        if (cancel.load(std::memory_order_relaxed))
+            return false;
+        m.set_buttons(buttons);
+        if (m.run(kStopVI) & kStopError)
+            return false;
+    }
+    return true;
+}
+
+// Presses `key` once and returns the machine after things have settled.
+bool Ripper::Impl::st_advance(const Bytes& cursor, uint32_t key, Bytes& next)
+{
+    Machine m;
+    std::string err;
+    if (!m.load_state(rom->words(), cursor, st_config(), err))
+        return false;
+    if (!st_frames(m, 2, 0) || !st_frames(m, kStHold, key) || !st_frames(m, kStSettle, 0))
+        return false;
+    for (int i = 0; i < 120; i++) {
+        if (st_can_snapshot(m) && m.snapshot(next))
+            return true;
+        if (!st_frames(m, 1, 0))
+            return false;
+    }
+    return false;
+}
+
+// Tries entry number `index` (0 = the one selected in `cursor`).  `cursor`
+// is moved on to that entry.  Returns false when the emulation failed or the
+// run was cancelled.
+bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StStep& out)
+{
+    out = StStep();
+    const bool select_plays = scheme.play.buttons == 0;
+    const uint32_t key = select_plays ? scheme.change.buttons : scheme.play.buttons;
+    const MachineConfig cfg = st_config();
+    std::string err;
+
+    if (!select_plays && index > 0) {
+        Bytes next;
+        if (!st_advance(cursor, scheme.change.buttons, next))
+            return false;
+        cursor.swap(next);
+    }
+
+    // What is heard if nothing is pressed.
+    PcmSink quiet;
+    {
+        Machine m;
+        if (!m.load_state(rom->words(), cursor, cfg, err))
+            return false;
+        m.set_audio_sink(&quiet);
+        while (m.seconds() < kStWindow + 1.6)
+            if (!st_frames(m, 1, 0))
+                return false;
+    }
+
+    // The same again with the key pressed.
+    PcmSink loud;
+    Machine m;
+    if (!m.load_state(rom->words(), cursor, cfg, err))
+        return false;
+    m.set_audio_sink(&loud);
+
+    // candidates for the save state: the last few from before the change
+    // (a ring, newest at pre_at) and the first two after it
+    const int kPre = 4;
+    Bytes pre[kPre], post[2], settled;
+    size_t pre_pos[kPre] = { 0, 0, 0, 0 }, post_pos[2] = { 0, 0 };
+    int n_pre = 0, pre_at = -1, n_post = 0;
+    bool have_settled = false;
+    bool diverged = false;
+    size_t cmp = 0;        // samples compared so far
+    size_t td = 0;         // frame at which the recordings part
+    double t_div = 0;
+    for (int frame = 0;; frame++) {
+        if (!st_frames(m, 1, (frame >= 2 && frame < 2 + kStHold) ? key : 0))
+            return false;
+        if (!diverged) {
+            const size_t n = std::min(loud.pcm.size(), quiet.pcm.size());
+            for (; cmp < n; cmp++) {
+                if (loud.pcm[cmp] != quiet.pcm[cmp]) {
+                    diverged = true;
+                    break;
+                }
+            }
+            // a game that only feeds the DAC while something plays
+            if (!diverged && cmp >= quiet.pcm.size()) {
+                for (; cmp < loud.pcm.size(); cmp++) {
+                    if (loud.pcm[cmp] > 64 || loud.pcm[cmp] < -64) {
+                        diverged = true;
+                        break;
+                    }
+                }
+            }
+            if (diverged) {
+                td = cmp / 2;
+                t_div = m.seconds();
+            }
+        }
+        if (!diverged) {
+            const int slot = (pre_at + 1) % kPre;
+            if (st_can_snapshot(m) && m.snapshot(pre[slot])) {
+                pre_at = slot;
+                pre_pos[slot] = loud.frames();
+                if (n_pre < kPre)
+                    ++n_pre;
+            }
+            if (m.seconds() >= kStWindow)
+                break;
+        } else {
+            if (n_post < 2 && st_can_snapshot(m) && m.snapshot(post[n_post])) {
+                post_pos[n_post] = loud.frames();
+                ++n_post;
+            }
+            const size_t have = loud.frames();
+            if (select_plays && !have_settled && loud.rate && have >= td + loud.rate / 2 && st_can_snapshot(m) && m.snapshot(settled))
+                have_settled = true;
+            if ((loud.rate && have >= td + (size_t)(kStListen * loud.rate)) || m.seconds() > t_div + kStListen + 2.0)
+                break;
+        }
+    }
+    if (select_plays) {
+        // the next entry is selected from wherever this press left the game
+        for (int i = 0; !have_settled && i < 120; i++) {
+            if (st_can_snapshot(m) && m.snapshot(settled))
+                have_settled = true;
+            else if (!st_frames(m, 1, 0))
+                return false;
+        }
+        if (!have_settled)
+            return false;
+        cursor.swap(settled);
+    }
+    m.shutdown();
+    if (!diverged || !loud.rate)
+        return true;
+
+    // A beep for moving the cursor also changes what is heard, but only for
+    // a moment: afterwards the two recordings are the same again.  A tune
+    // that was started keeps them apart.
+    {
+        const size_t a = td + loud.rate * 3 / 10;
+        const size_t b = std::min(std::min(quiet.frames(), loud.frames()), td + loud.rate * 3 / 2);
+        if (b > a + loud.rate / 2) {
+            const size_t block = std::max<size_t>(1, loud.rate / 100);
+            size_t total = 0, differing = 0;
+            for (size_t i = a; i + block <= b; i += block) {
+                ++total;
+                if (std::memcmp(loud.pcm.data() + i * 2, quiet.pcm.data() + i * 2, block * 2 * sizeof(int16_t)) != 0)
+                    ++differing;
+            }
+            FeatureExtractor fa, fb;
+            fa.feed(loud.pcm.data() + a * 2, b - a, loud.rate);
+            fb.feed(quiet.pcm.data() + a * 2, b - a, loud.rate);
+            if (differing * 2 < total || similarity(fa.track(), fb.track(), 1.2) >= 0.90)
+                return true;
+        }
+    }
+    out.reacted = true;
+
+    {
+        FeatureExtractor fx;
+        fx.feed(loud.pcm.data() + td * 2, loud.frames() - td, loud.rate);
+        out.print = fx.track();
+    }
+
+    // A state is only of use if it goes on to play the new sound with nobody
+    // touching the controller.  One from shortly before the change is best
+    // (nothing of the tune is cut off), but it may predate the moment the
+    // game noticed the key, in which case it just keeps playing the old
+    // sound; the ones after the change are the fallback.  A restored game
+    // does not reproduce the recording sample for sample (the audio hardware
+    // starts out idle), so the comparison is by ear: what the state plays
+    // from the point of the change on has to sound like the new sound, and
+    // more so than like what was playing before.
+    FeatureTrack old_print;
+    if (quiet.frames() > td + loud.rate / 2) {
+        FeatureExtractor fx;
+        fx.feed(quiet.pcm.data() + td * 2, quiet.frames() - td, loud.rate);
+        old_print = fx.track();
+    }
+    auto plays_alone = [&](const Bytes& snap, size_t pos) -> int {
+        const size_t lead = td > pos ? td - pos : 0;
+        const size_t need = lead + loud.rate + loud.rate / 4;
+        Machine v;
+        PcmSink vs;
+        std::string e;
+        if (!v.load_state(rom->words(), snap, cfg, e))
+            return 0;
+        v.set_audio_sink(&vs);
+        while (vs.frames() < need && v.seconds() < 8.0)
+            if (!st_frames(v, 1, 0))
+                return -1;
+        if (vs.frames() < lead + loud.rate / 2)
+            return 0;
+        FeatureExtractor fx;
+        fx.feed(vs.pcm.data() + lead * 2, vs.frames() - lead, vs.rate);
+        const double like_new = similarity(fx.track(), out.print, 1.0);
+        const double like_old = old_print.frames() ? similarity(fx.track(), old_print, 1.0) : 0.0;
+        return (like_new >= 0.70 && (like_new >= like_old + 0.10 || like_new >= 0.95)) ? 1 : 0;
+    };
+    // order of preference: before the change with a little room to spare
+    // (so that a dropped audio buffer still belongs to the old sound), then
+    // right before the change, then after it
+    std::vector<std::pair<const Bytes*, size_t>> tries;
+    const size_t room = loud.rate / 20;
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < n_pre; i++) {
+            const int slot = ((pre_at - i) % kPre + kPre) % kPre;
+            const bool roomy = pre_pos[slot] + room <= td;
+            if (roomy == (pass == 0))
+                tries.emplace_back(&pre[slot], pre_pos[slot]);
+        }
+    }
+    for (int i = 0; i < n_post; i++)
+        tries.emplace_back(&post[i], post_pos[i]);
+    for (const auto& t : tries) {
+        const int r = plays_alone(*t.first, t.second);
+        if (r < 0)
+            return false;
+        if (r == 1) {
+            out.state = *t.first;
+            out.captured = true;
+            break;
+        }
+    }
+    return true;
+}
+
+// How many different sounds the first few entries give with these keys.
+int Ripper::Impl::st_probe(const StScheme& scheme, const Bytes& root)
+{
+    Bytes cur = root;
+    std::vector<FeatureTrack> prints;
+    int distinct = 0, misses = 0;
+    for (int k = 0; k < 4; k++) {
+        StStep st;
+        if (!st_step(scheme, cur, k, st))
+            break;
+        if (!st.captured) {
+            if (++misses >= 2 && distinct == 0)
+                break;
+            continue;
+        }
+        bool seen = false;
+        for (const FeatureTrack& p : prints)
+            if (similarity(st.print, p, 2.5) >= kStSame)
+                seen = true;
+        if (!seen)
+            ++distinct;
+        prints.push_back(std::move(st.print));
+    }
+    return distinct;
+}
+
+bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, std::string& err)
+{
+    Impl& d = *impl_;
+    result = SoundTestResult();
+    if (!d.rom || d.rom->empty()) {
+        err = "no ROM loaded";
+        return false;
+    }
+    if (pj64_state.size() < 8 || rd32le(pj64_state.data()) != 0x23D8A6C8u) {
+        err = "not a Project64 save state";
+        return false;
+    }
+    {
+        Machine m;
+        if (!m.load_state(d.rom->words(), pj64_state, d.st_config(), err))
+            return false;
+    }
+    if (d.is_running.exchange(true)) {
+        err = "busy";
+        return false;
+    }
+
+    int threads = d.opt.threads;
+    if (threads <= 0) {
+        threads = (int)std::thread::hardware_concurrency();
+        if (threads <= 0)
+            threads = 2;
+        if (threads > 8)
+            threads = 8;
+    }
+
+    const StKey right = { kBtnDRight, "D-Pad Right" }, down = { kBtnDDown, "D-Pad Down" };
+    const StKey left = { kBtnDLeft, "D-Pad Left" }, up = { kBtnDUp, "D-Pad Up" };
+    const StKey s_right = { stick(80, 0), "Stick Right" }, s_down = { stick(0, -80), "Stick Down" };
+    const StKey key_a = { kBtnA, "A" }, key_b = { kBtnB, "B" }, key_start = { kBtnStart, "START" }, key_z = { kBtnZ, "Z" };
+    const StKey key_r = { kBtnR, "R" }, c_right = { kBtnCRight, "C Right" }, c_down = { kBtnCDown, "C Down" };
+    const StKey none = { 0, "" };
+    // most likely first: with equal results the earlier one is used
+    const std::vector<StScheme> schemes = {
+        { right, key_a },   { down, key_a },     { s_right, key_a },   { s_down, key_a },
+        { right, none },    { down, none },      { s_right, none },    { s_down, none },
+        { right, key_start }, { down, key_start }, { s_right, key_start }, { s_down, key_start },
+        { key_r, key_a },   { c_right, key_a },  { c_down, key_a },    { key_r, none },
+        { right, key_b },   { down, key_b },     { right, key_z },     { down, key_z },
+        { key_a, none },    { left, key_a },     { up, key_a },
+    };
+
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.cancel.store(false);
+        d.t_start = Clock::now();
+        d.prog.st_phase = 1;
+        d.prog.st_entry = 0;
+        d.prog.st_keys.clear();
+    }
+    d.emit_progress(false);
+
+    auto finish = [&d]() {
+        {
+            std::lock_guard<std::mutex> lk(d.mu);
+            d.prog.st_phase = 0;
+            d.st_mode = false;
+            d.st_walking = false;
+        }
+        d.is_running.store(false);
+        d.emit_progress(true);
+    };
+
+    // ---- 1. which keys work this screen? --------------------------------
+    std::vector<int> score(schemes.size(), 0);
+    {
+        std::atomic<size_t> next{ 0 };
+        std::vector<std::thread> pool;
+        const int n = std::min<int>(threads, (int)schemes.size());
+        for (int t = 0; t < n; t++) {
+            pool.emplace_back([&] {
+                for (;;) {
+                    const size_t i = next.fetch_add(1);
+                    if (i >= schemes.size() || d.cancel.load())
+                        break;
+                    score[i] = d.st_probe(schemes[i], pj64_state);
+                    d.logf("sound test: %s%s%s -> %d different sound(s)", schemes[i].change.name,
+                           schemes[i].play.buttons ? " + " : "", schemes[i].play.name, score[i]);
+                }
+            });
+        }
+        for (std::thread& t : pool)
+            t.join();
+    }
+    if (d.cancel.load()) {
+        finish();
+        result.cancelled = true;
+        err = "cancelled";
+        return false;
+    }
+    size_t best = 0;
+    for (size_t i = 1; i < schemes.size(); i++)
+        if (score[i] > score[best])
+            best = i;
+    if (score[best] < 2) {
+        finish();
+        err = "the screen in this save state does not react like a sound test: no key was found that moves "
+              "to another tune and plays it";
+        return false;
+    }
+    const StScheme scheme = schemes[best];
+    result.controls_found = true;
+    result.keys = scheme.change.name;
+    if (scheme.play.buttons) {
+        result.keys += ", then ";
+        result.keys += scheme.play.name;
+    }
+    d.logf("sound test: using %s", result.keys.c_str());
+
+    // ---- 2. walk the list ------------------------------------------------
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.st_mode = true;
+        d.st_walking = true;
+        d.stop_workers = false;
+        d.active = 0;
+        d.prog.st_phase = 2;
+        d.prog.st_keys = result.keys;
+    }
+    std::vector<std::thread> pool;
+    for (int i = 0; i < threads; i++)
+        pool.emplace_back([&d, i] { d.worker(i); });
+
+    Bytes cur = pj64_state;
+    std::vector<FeatureTrack> prints;   // one per different sound, in order
+    int misses = 0, repeats = 0;
+    for (int k = 0; k < kStMaxEntries && !d.cancel.load(); k++) {
+        {
+            std::lock_guard<std::mutex> lk(d.mu);
+            d.prog.st_entry = k + 1;
+        }
+        d.emit_progress(false);
+
+        StStep st;
+        if (!d.st_step(scheme, cur, k, st))
+            break;
+        result.entries = k + 1;
+        if (!st.captured) {
+            // an empty slot; a few of those in a row and the list is over
+            if (++misses >= 8)
+                break;
+            continue;
+        }
+        misses = 0;
+        if (!prints.empty() && similarity(st.print, prints.back(), 2.5) >= kStSame) {
+            // the selection no longer moves: end of a list that does not wrap
+            if (++repeats >= 3)
+                break;
+            continue;
+        }
+        repeats = 0;
+        prints.push_back(st.print);
+        const size_t n = prints.size();
+        if (n >= 4 && similarity(prints[n - 1], prints[1], 2.5) >= kStSame && similarity(prints[n - 2], prints[0], 2.5) >= kStSame)
+            break;   // been round once
+
+        Candidate c;
+        c.state = PackedState::pack(st.state);
+        c.origin = SongOrigin::SoundTest;
+        c.order = k;
+        char title[32];
+        std::snprintf(title, sizeof(title), "Track %02d", k + 1);
+        c.title = title;
+        ++result.sounds;
+        {
+            std::lock_guard<std::mutex> lk(d.mu);
+            d.prog.candidates++;
+            d.queue.push_back(std::move(c));
+        }
+        d.cv.notify_all();
+    }
+
+    // ---- 3. let the analysis of what was queued finish ---------------------
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.st_walking = false;
+    }
+    d.cv.notify_all();
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(d.mu);
+            if (d.cv.wait_for(lk, std::chrono::milliseconds(300), [&d] { return d.stop_workers; }))
+                break;
+        }
+        d.emit_progress(false);
+    }
+    for (std::thread& t : pool)
+        t.join();
+    result.cancelled = d.cancel.load();
+    finish();
+    return true;
+}
+
 void Ripper::run()
 {
     Impl& d = *impl_;
@@ -1265,6 +1799,7 @@ std::vector<SongInfo> Ripper::songs() const
     out.reserve(impl_->songs.size());
     for (const auto& s : impl_->songs)
         out.push_back(s->info);
+    std::stable_sort(out.begin(), out.end(), [](const SongInfo& a, const SongInfo& b) { return a.order < b.order; });
     return out;
 }
 
@@ -1274,6 +1809,7 @@ bool Ripper::rename_song(int id, const std::string& title)
     for (auto& s : impl_->songs) {
         if (s->info.id == id) {
             s->info.title = title;
+            s->auto_title = false;
             return true;
         }
     }
@@ -1490,7 +2026,7 @@ bool Ripper::write_set(const Path& dir, const SetTags& tags, const std::vector<i
             char auto_name[32], out_name[32];
             std::snprintf(auto_name, sizeof(auto_name), "Track %02d", s.info.id);
             std::snprintf(out_name, sizeof(out_name), "Track %0*d", digits, (int)i + 1);
-            if (title == auto_name)
+            if (s.auto_title && title == auto_name)
                 title = out_name;
         }
         t.emplace_back("title", title);

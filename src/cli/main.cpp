@@ -32,7 +32,7 @@ public:
     bool verbose = false;
     void on_log(const std::string& s) override
     {
-        if (!verbose && s.compare(0, 8, "explore:") == 0)
+        if (!verbose && (s.compare(0, 8, "explore:") == 0 || s.compare(0, 11, "sound test:") == 0))
             return;
         std::lock_guard<std::mutex> lk(mu_);
         std::printf("  %s\n", s.c_str());
@@ -42,6 +42,21 @@ public:
     {
         std::lock_guard<std::mutex> lk(mu_);
         const int sec = (int)p.elapsed_seconds;
+        if (p.st_phase == 2 && !p.finished) {
+            if (p.st_entry == last_entry_)
+                return;
+            last_entry_ = p.st_entry;
+            std::printf("[%4ds] sound test entry %d (%s): songs %d, waiting %d\n", sec, p.st_entry, p.st_keys.c_str(), p.songs, p.pending);
+            std::fflush(stdout);
+            return;
+        }
+        if (p.st_phase == 1 && !p.finished) {
+            if (last_entry_ != -2)
+                std::printf("finding out how the sound test screen is operated...\n");
+            last_entry_ = -2;
+            std::fflush(stdout);
+            return;
+        }
         if (sec / 10 == last_tick_ && !p.finished)
             return;
         last_tick_ = sec / 10;
@@ -69,6 +84,7 @@ public:
 private:
     std::mutex mu_;
     int last_tick_ = -1;
+    int last_entry_ = -1;
 };
 
 class WavSink : public AudioSink {
@@ -98,6 +114,9 @@ void usage()
         "  --no-buttons       do not press any buttons, only listen to the untouched game\n"
         "  --state <file>     also make a song from this Project64 save state (.pj or\n"
         "                     .pj.zip; repeatable; with --time 0 nothing else is searched)\n"
+        "  --sound-test <file> a save state taken on the game's sound test screen: finds\n"
+        "                     out the controls and plays every entry in turn (the\n"
+        "                     game is then only explored too if --time is given)\n"
         "  --game <name>      game name for the tags and file names\n"
         "  --artist <name>    artist tag\n"
         "  --threads <n>      worker threads (default: one per core, at most 8)\n"
@@ -185,7 +204,8 @@ int run(std::vector<std::string> args)
     }
 
     std::string rom_path, out_dir;
-    std::vector<std::string> states;
+    std::vector<std::string> states, sound_tests;
+    bool time_given = false;
     RipOptions opt;
     SetTags tags;
     bool full_rom = false, verbose = false, want_wav = false;
@@ -200,7 +220,8 @@ int run(std::vector<std::string> args)
             return args[++i];
         };
         if (a == "-o") out_dir = next();
-        else if (a == "--time") opt.search_seconds = std::atof(next().c_str());
+        else if (a == "--time") { opt.search_seconds = std::atof(next().c_str()); time_given = true; }
+        else if (a == "--sound-test") sound_tests.push_back(next());
         else if (a == "--no-buttons") opt.press_buttons = false;
         else if (a == "--state") states.push_back(next());
         else if (a == "--game") tags.game = next();
@@ -260,7 +281,26 @@ int run(std::vector<std::string> args)
             std::printf("state %s: %s\n", sp.c_str(), err.c_str());
     }
 
-    if (opt.search_seconds > 0 || states.empty())
+    for (const std::string& sp : sound_tests) {
+        Bytes st;
+        if (!load_pj64_state(path_from_utf8(sp), st, err)) {
+            std::printf("state %s: %s\n", sp.c_str(), err.c_str());
+            continue;
+        }
+        SoundTestResult res;
+        if (ripper.run_sound_test(st, res, err))
+            std::printf("sound test %s: operated with %s; %d entries tried, %d gave a new sound\n", sp.c_str(), res.keys.c_str(), res.entries, res.sounds);
+        else if (!res.cancelled) {
+            // not a sound test after all: use it the ordinary way
+            std::printf("sound test %s: %s; adding it as an ordinary save state\n", sp.c_str(), err.c_str());
+            if (!ripper.add_from_state(st, state_title_from_path(path_from_utf8(sp)), nullptr, err))
+                std::printf("state %s: %s\n", sp.c_str(), err.c_str());
+        }
+    }
+
+    // With a sound test state the game is only explored as well when asked to.
+    const bool explore = sound_tests.empty() ? (opt.search_seconds > 0 || states.empty()) : (time_given && opt.search_seconds > 0);
+    if (explore)
         ripper.run();
 
     const std::vector<SongInfo> songs = ripper.songs();
