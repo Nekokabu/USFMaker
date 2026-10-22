@@ -15,7 +15,7 @@ which is what lets USF Maker check a generated file "the way a player would".
 
 | File | Purpose |
 | --- | --- |
-| `usf/usfx.h`, `usf/usfx.c` | The extension API: cold boot, controller input, run-until-event, save state export (Project64 1.x layout), cartridge read coverage, statistics, blank cartridge save memory (EEPROM / SRAM / FlashRAM). |
+| `usf/usfx.h`, `usf/usfx.c` | The extension API: cold boot, controller input, run-until-event, save state export (Project64 1.x layout), cartridge read coverage, statistics, blank cartridge save memory (EEPROM / SRAM / FlashRAM), the Aleck64 arcade board (SDRAM, DIP switches and inputs at physical 0xC0000000+, layout as in MAME). |
 | `usf/adler32.h` | Small Adler-32 so that the core does not need zlib. |
 | `sources.mk` | List of the C files that make up the library. |
 | `lazyusf2.vcxproj`, `.filters` | Visual Studio project. |
@@ -31,14 +31,16 @@ The x86 / x86-64 dynamic recompiler sources and the unused "new dynarec"
 | File | Change |
 | --- | --- |
 | `usf/usf.c`, `usf/usf.h`, `usf/usf_internal.h` | Extension block appended to the state; audio callback / stop hook when buffers are pushed; controllers wired up in `usf_clear()`; `usf_startup()` exported; shared (caller owned) ROM image; clean-up of extension data. |
-| `main/main.c` | Cold boot path: enter IPL3 at 0xA4000040 instead of loading a save state. |
+| `main/main.c` | Cold boot path: enter IPL3 at 0xA4000040 instead of loading a save state; MAME's IPL3 patch for Aleck64 cartridges when the board is enabled. |
 | `main/rom.c` | Does not free a ROM image owned by the caller. |
 | `si/game_controller.c`, `.h` | A controller that can be plugged in and whose buttons can be set; poll statistics. |
 | `si/pif.c` | Cartridge channel commands answered by the optional EEPROM. |
 | `si/si_controller.c` | SI DMA address masked to 24 bits and bounds checked. |
 | `pi/pi_controller.c`, `.h` | Cartridge read coverage and DMA callback; `PI_DRAM_ADDR` masked to 24 bits; SRAM / FlashRAM transfers when enabled. |
 | `pi/cart_rom.c` | Coverage for direct (non DMA) cartridge reads. |
-| `memory/memory.c` | Coverage for `fast_mem_access`; FlashRAM status / command registers when enabled. |
+| `memory/memory.c` | Coverage for `fast_mem_access`; FlashRAM status / command registers when enabled; TLB-mapped accesses to the Aleck64 board. |
+| `r4300/tlb.c` | Keeps TLB entries for physical 0xC0000000+ when the Aleck64 board is enabled (stock lazyusf2 drops them); counts TLB misses. |
+| `si/cic.c`, `si/cic.h` | CIC-NUS-5101 (Aleck64, seed 0xAC), recognised by the sum of 0x40-0xBFF or 0x40-0xFFF. |
 | `ai/ai_controller.c` | AI DMA address masked and bounds checked. |
 | `rsp/rsp_core.c` | SP DMA wraps inside DMEM/IMEM and is bounds checked against RDRAM; task statistics. |
 | `rsp_hle/memory.h`, `rsp_hle/plugin.c` | RDRAM mask for HLE accesses; counts audio tasks that fell back to the interpreter. |

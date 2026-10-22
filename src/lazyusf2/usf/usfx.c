@@ -796,3 +796,152 @@ int usfx_cart_save_import(void * state, const uint8_t * data, size_t size)
     }
     return 1;
 }
+
+/* ------------------------------------------------------------------------
+ * Aleck64 board (see usfx.h)
+ * ------------------------------------------------------------------------ */
+
+#define A64_BLOB_MAGIC 0x34364C41u   /* "AL64" */
+#define A64_BLOB_HEADER 16
+
+void usfx_set_aleck64(void * state, int enable)
+{
+    struct usfx_aleck64 * a = &USF_STATE->usfx.a64;
+    a->enabled = enable ? 1 : 0;
+    if (a->enabled && !a->in0 && !a->in1 && !a->inmj)
+    {
+        /* all DIP switches off, nothing pressed */
+        a->in0 = 0xffffffffu;
+        a->in1 = 0xffffffffu;
+        a->inmj = 0xffffffffu;
+    }
+}
+
+void usfx_set_aleck64_inputs(void * state, uint32_t in0, uint32_t in1, uint32_t inmj)
+{
+    struct usfx_aleck64 * a = &USF_STATE->usfx.a64;
+    a->in0 = in0;
+    a->in1 = in1;
+    a->inmj = inmj;
+}
+
+void usfx_a64_free(struct usf_state * s)
+{
+    free(s->usfx.a64.sdram);
+    s->usfx.a64.sdram = 0;
+    s->usfx.a64.dip_read_offset = 0;
+}
+
+static uint32_t * a64_sdram(struct usfx_aleck64 * a)
+{
+    if (!a->sdram)
+        a->sdram = (uint32_t *)calloc(USFX_A64_SDRAM_BYTES / 4, 4);
+    return a->sdram;
+}
+
+int usfx_a64_read(void * opaque, uint32_t address, uint32_t * value)
+{
+    struct usf_state * s = (struct usf_state *)opaque;
+    struct usfx_aleck64 * a = &s->usfx.a64;
+
+    *value = 0;
+    if ((address & 0xff800000u) == 0xc0000000u)
+    {
+        uint32_t * m = a64_sdram(a);
+        if (m)
+            *value = m[(address & 0x7ffffcu) >> 2];
+    }
+    else if ((address & 0xfffff000u) == 0xc0800000u)
+    {
+        switch ((address & 0xfffu) >> 2)
+        {
+        case 0: *value = a->in0; break;
+        case 1: *value = a->in1; break;
+        case 2:
+            s->usfx.stats.a64_mj_reads++;
+            switch ((a->dip_read_offset >> 8) & 0xff)
+            {
+            case 1: *value = a->inmj; break;
+            case 2: *value = a->inmj << 8; break;
+            case 4: *value = a->inmj << 16; break;
+            case 8: *value = a->inmj >> 8; break;
+            default: *value = 0; break;
+            }
+            break;
+        default: break;
+        }
+    }
+    return 0;
+}
+
+int usfx_a64_write(void * opaque, uint32_t address, uint32_t value, uint32_t mask)
+{
+    struct usf_state * s = (struct usf_state *)opaque;
+    struct usfx_aleck64 * a = &s->usfx.a64;
+
+    if ((address & 0xff800000u) == 0xc0000000u)
+    {
+        uint32_t * m = a64_sdram(a);
+        if (m)
+        {
+            uint32_t * w = &m[(address & 0x7ffffcu) >> 2];
+            *w = (*w & ~mask) | (value & mask);
+        }
+    }
+    else if ((address & 0xfffff000u) == 0xc0800000u && ((address & 0xfffu) >> 2) == 2)
+    {
+        a->dip_read_offset = (a->dip_read_offset & ~mask) | (value & mask);
+    }
+    return 0;
+}
+
+size_t usfx_aleck64_max(void)
+{
+    return A64_BLOB_HEADER + USFX_A64_SDRAM_BYTES;
+}
+
+size_t usfx_aleck64_export(void * state, uint8_t * out, size_t capacity)
+{
+    struct usfx_aleck64 * a = &USF_STATE->usfx.a64;
+    const size_t need = A64_BLOB_HEADER + (a->sdram ? USFX_A64_SDRAM_BYTES : 0);
+
+    if (!a->enabled || (!a->sdram && !a->dip_read_offset))
+        return 0;
+    if (!out || capacity < need)
+        return 0;
+    blob_put32(out, A64_BLOB_MAGIC);
+    blob_put32(out + 4, a->dip_read_offset);
+    blob_put32(out + 8, a->sdram ? 1u : 0u);
+    blob_put32(out + 12, 0);
+    if (a->sdram)
+    {
+        /* little endian on every host, so the blob is portable */
+        uint8_t * p = out + A64_BLOB_HEADER;
+        size_t i;
+        for (i = 0; i < USFX_A64_SDRAM_BYTES / 4; i++)
+            blob_put32(p + i * 4, a->sdram[i]);
+    }
+    return need;
+}
+
+int usfx_aleck64_import(void * state, const uint8_t * data, size_t size)
+{
+    usf_state_t * s = USF_STATE;
+    struct usfx_aleck64 * a = &s->usfx.a64;
+    size_t i;
+
+    usfx_a64_free(s);
+    if (!data || size == 0)
+        return 1;
+    if (size < A64_BLOB_HEADER || blob_get32(data) != A64_BLOB_MAGIC)
+        return 0;
+    a->dip_read_offset = blob_get32(data + 4);
+    if (blob_get32(data + 8))
+    {
+        if (size < A64_BLOB_HEADER + USFX_A64_SDRAM_BYTES || !a64_sdram(a))
+            return 0;
+        for (i = 0; i < USFX_A64_SDRAM_BYTES / 4; i++)
+            a->sdram[i] = blob_get32(data + A64_BLOB_HEADER + i * 4);
+    }
+    return 1;
+}

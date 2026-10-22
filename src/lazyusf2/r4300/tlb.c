@@ -51,6 +51,8 @@ void tlb_unmap(usf_state_t * state, tlb *entry)
     }
 }
 
+/* USFX: physical addresses from 0xC0000000 on are kept when the Aleck64
+   board is enabled (see usfx_foreign() in memory.c) */
 void tlb_map(usf_state_t * state, tlb *entry)
 {
     unsigned int i;
@@ -59,7 +61,7 @@ void tlb_map(usf_state_t * state, tlb *entry)
     {
         if (entry->start_even < entry->end_even &&
             !(entry->start_even >= 0x80000000 && entry->end_even < 0xC0000000) &&
-            entry->phys_even < 0x20000000)
+            (entry->phys_even < 0x20000000 || (state->usfx.a64.enabled && entry->phys_even >= 0xc0000000u)))
         {
             for (i=entry->start_even;i<entry->end_even;i+=0x1000)
                 state->tlb_LUT_r[i>>12] = 0x80000000 | (entry->phys_even + (i - entry->start_even) + 0xFFF);
@@ -73,7 +75,7 @@ void tlb_map(usf_state_t * state, tlb *entry)
     {
         if (entry->start_odd < entry->end_odd &&
             !(entry->start_odd >= 0x80000000 && entry->end_odd < 0xC0000000) &&
-            entry->phys_odd < 0x20000000)
+            (entry->phys_odd < 0x20000000 || (state->usfx.a64.enabled && entry->phys_odd >= 0xc0000000u)))
         {
             for (i=entry->start_odd;i<entry->end_odd;i+=0x1000)
                 state->tlb_LUT_r[i>>12] = 0x80000000 | (entry->phys_odd + (i - entry->start_odd) + 0xFFF);
@@ -104,6 +106,7 @@ unsigned int virtual_to_physical_address(usf_state_t * state, unsigned int addre
     if (state->debug_log)
       fprintf(state->debug_log, "TLB exception @ %x, %x, add:%x\n", addresse, w, state->PC->addr);
 #endif
+    state->usfx.stats.tlb_misses++; /* USFX */
     TLB_refill_exception(state,addresse,w);
     //return 0x80000000;
     return 0x00000000;

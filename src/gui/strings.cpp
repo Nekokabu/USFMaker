@@ -114,6 +114,11 @@ const Entry kText[S_COUNT] = {
         L"自動操作でたどり着けない場面の曲は見つけられません。その場合は Project64 で目的の曲が鳴り始める直前にセーブステートを作り、"
         L"[セーブステートから追加] で読み込んでください（.pj / .pj.zip に対応。ステートファイルのドロップでも可）。\n"
         L"\n"
+        L"【Aleck64（業務用）のゲーム】\n"
+        L"CIC-NUS-5101 のカートリッジは自動で Aleck64 として動かし、[開始] のボタン操作でコインも投入します。"
+        L"DIP スイッチは [詳細設定] で変えられます。[開始] すると、まずテストモード（DIP SW2-8 / テストスイッチ）のメニューから"
+        L"サウンドテストを探し、見つかれば全曲を順に取り込んでから、通常の探索に移ります。\n"
+        L"\n"
         L"【サウンドテストがあるゲーム】\n"
         L"ゲーム内にサウンドテスト（曲を選んで聴ける画面）がある場合は、その画面で Project64 のセーブステートを作り、"
         L"「ステートはサウンドテスト画面」にチェックを入れてから読み込んでください。曲を切り替えるボタンと再生するボタンを自動で探し、"
@@ -134,6 +139,11 @@ const Entry kText[S_COUNT] = {
         L"When not everything is found\n"
         L"Music in places the automatic player can not reach is not found. In that case make a save state in Project64 just before the tune starts "
         L"and load it with Add from save state (.pj and .pj.zip; dropping the state file works too).\n"
+        L"\n"
+        L"Aleck64 (arcade) games\n"
+        L"Cartridges with a CIC-NUS-5101 run as Aleck64 automatically; pressing Start also drops a coin. "
+        L"The DIP switches are in Settings. Start first looks for the sound test in the test mode menu (DIP SW2-8 / test switch) "
+        L"and captures every tune there, then carries on with the normal search.\n"
         L"\n"
         L"Games with a sound test\n"
         L"If the game has a sound test (a screen where tunes can be selected and played), make a Project64 save state on that screen, "
@@ -162,6 +172,19 @@ const Entry kText[S_COUNT] = {
     /* S_LOG_ST_FAILED */ { L"%ls: サウンドテスト画面として操作できませんでした（曲を切り替えて再生するボタンが見つかりません）。通常のステートとして追加します。",
                             L"%ls: could not operate this as a sound test screen (no key found that selects and plays another tune). Adding it as an ordinary save state." },
     /* S_ORIGIN_SOUNDTEST */ { L"サウンドテスト %d 項目め", L"Sound test, entry %d" },
+    /* S_SET_HW */ { L"動かすハードウェア", L"Hardware" },
+    /* S_HW_AUTO */ { L"自動（ROM から判定）", L"Automatic (from the ROM)" },
+    /* S_HW_N64 */ { L"NINTENDO64", L"Nintendo 64" },
+    /* S_HW_ALECK64 */ { L"Aleck64（業務用）", L"Aleck64 (arcade)" },
+    /* S_SET_GROUP_DIP */ { L"Aleck64（業務用）― DIP スイッチはチェック = ON", L"Aleck64 (arcade) - DIP switches: ticked = ON" },
+    /* S_NOTE_A64 */ { L"Aleck64 専用回路に触れる", L"Touches Aleck64 hardware" },
+    /* S_ROM_IS_ALECK64 */ { L"　Aleck64（業務用）として動かします", L"   runs as Aleck64 (arcade)" },
+    /* S_SET_A64_TESTMENU */ { L"[開始] で、まずテストモードのサウンドテストから全曲を取り込む", L"On Start, first capture every tune from the test mode's sound test" },
+    /* S_STATUS_TESTMENU */ { L"テストモードのメニューを調べています… %d 項目め", L"Looking through the test mode menu... item %d" },
+    /* S_LOG_TESTMENU_FOUND */ { L"テストモード: %d 項目めがサウンドテストでした（%ls）。操作 %ls で %d 項目を試し、%d 項目を解析しました。",
+                                 L"Test mode: item %d is the sound test (%ls). Keys %ls: %d entries tried, %d analysed." },
+    /* S_LOG_TESTMENU_NONE */ { L"テストモードのサウンドテストは見つかりませんでした。通常の探索を続けます。",
+                                L"No sound test was found in the test mode; carrying on with the normal search." },
 };
 
 } // namespace

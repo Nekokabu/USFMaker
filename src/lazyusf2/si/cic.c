@@ -42,11 +42,25 @@ void init_cic_using_ipl3(usf_state_t * state, struct cic* cic, const void* ipl3)
         { CIC_X102, 0x3f },
         { CIC_X103, 0x78 },
         { CIC_X105, 0x91 },
-        { CIC_X106, 0x85 }
+        { CIC_X106, 0x85 },
+        { CIC_5101, 0xac }   /* USFX: Aleck64 */
     };
+    unsigned long long crc_c00 = 0;
 
     for (i = 0; i < 0xfc0/4; i++)
+    {
+        if (i == (0xc00 - 0x40) / 4)
+            crc_c00 = crc;
         crc += ((uint32_t*)ipl3)[i];
+    }
+
+    /* USFX: the Aleck64 IPL3 ends at 0xC00; what follows differs between
+       games (Project64 sums 0x40-0xBFF, mupen64plus 0x40-0xFFF) */
+    if (crc == 0x000000A5F80BF620LL || crc_c00 == 0x000000A5F80BF620LL)
+    {
+        memcpy(cic, &cics[5], sizeof(*cic));
+        return;
+    }
 
     switch(crc)
     {

@@ -502,6 +502,7 @@ void usf_shutdown(void * state)
     USF_STATE->usfx.rom_cover = 0;
     USF_STATE->usfx.rom_cover_bytes = 0;
     usfx_cart_free(USF_STATE);
+    usfx_a64_free(USF_STATE);
 }
 
 void * usf_get_rom_coverage_barray(void * state)

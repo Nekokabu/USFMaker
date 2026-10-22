@@ -1,6 +1,7 @@
 // USF Maker - the automatic ripper.
 // Copyright (C) 2026 Nekokabu.  GPL-2.0-or-later, see LICENSE.
 #include "ripper.h"
+#include "statefile.h"
 
 #include <algorithm>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -122,8 +124,8 @@ const char* bot_style_name(int s)
 
 class InputBot {
 public:
-    InputBot(uint64_t seed, int style, int frames_per_second)
-        : rng_(seed), style_(style), fps_(frames_per_second > 0 ? frames_per_second : 60)
+    InputBot(uint64_t seed, int style, int frames_per_second, bool mahjong = false)
+        : rng_(seed), style_(style), fps_(frames_per_second > 0 ? frames_per_second : 60), mahjong_(mahjong)
     {
         wait_ = rng_.range(fps_ / 4, fps_);
     }
@@ -137,13 +139,14 @@ public:
         dir_left_ = 0;
     }
 
-    // called once per video frame
-    uint32_t next()
+    // called once per video frame: controller buttons in the low half,
+    // cabinet / mahjong panel keys (kCab*) in the high half
+    uint64_t next()
     {
         if (style_ == kBotIdle)
             return 0;
 
-        uint32_t out = 0;
+        uint64_t out = 0;
 
         // a direction that is held down for a while (walking around)
         if (style_ == kBotPlay || style_ == kBotMash) {
@@ -200,6 +203,10 @@ public:
             break;
         }
         }
+        // a mahjong game is played on its panel: tap tile keys A..N and
+        // the call buttons as often as the pad buttons
+        if (mahjong_ && style_ != kBotStart && cur_ != kBtnStart && rng_.range(0, 1) == 0)
+            cur_ = (uint64_t)(kCabMjA << rng_.range(0, 18)) << 32;
         hold_ = rng_.range(3, 6);
         return out | cur_;
     }
@@ -225,8 +232,9 @@ private:
     Rng rng_;
     int style_;
     int fps_;
+    bool mahjong_;
     int wait_ = 0, hold_ = 0;
-    uint32_t cur_ = 0;
+    uint64_t cur_ = 0;
     int held_dir_ = 0, dir_left_ = 0;
 };
 
@@ -340,15 +348,55 @@ size_t popcount_new(const uint8_t* local, uint8_t* global, size_t bytes)
 
 // ---- sound test walk ------------------------------------------------------
 struct StKey {
-    uint32_t buttons;
+    uint32_t buttons;             // controller
+    uint32_t cab;                 // cabinet switches (kCab*, Aleck64)
     const char* name;
+    bool none() const { return !buttons && !cab; }
+    uint64_t input() const { return (uint64_t)buttons | ((uint64_t)cab << 32); }
 };
 
+// Keys of the Aleck64 mahjong control panel: 0..13 = A..N, then kan, pon,
+// chi, reach, ron.
+StKey mahjong_key(int i)
+{
+    static const char* const names[19] = {
+        "Mahjong A", "Mahjong B", "Mahjong C", "Mahjong D", "Mahjong E", "Mahjong F", "Mahjong G",
+        "Mahjong H", "Mahjong I", "Mahjong J", "Mahjong K", "Mahjong L", "Mahjong M", "Mahjong N",
+        "Mahjong Kan", "Mahjong Pon", "Mahjong Chi", "Mahjong Reach", "Mahjong Ron" };
+    if (i < 0 || i >= 19)
+        i = 0;
+    return StKey{ 0, (uint32_t)kCabMjA << i, names[i] };
+}
+
 // How a sound test screen is operated: one key moves to the next entry and
-// one starts it.  play.buttons == 0 means that moving to an entry plays it.
+// one starts it.  play.none() means that moving to an entry plays it.
 struct StScheme {
     StKey change;
     StKey play;
+};
+
+std::string scheme_name(const StScheme& s)
+{
+    std::string n = s.change.name;
+    if (!s.play.none()) {
+        n += ", then ";
+        n += s.play.name;
+    }
+    return n;
+}
+
+// A machine to come back to: the save state plus what a Project64 save
+// state has no room for (cartridge save memory, Aleck64 SDRAM).  Games keep
+// their menus there, so it has to travel along.
+struct StSnap {
+    Bytes state;
+    Bytes side;
+    bool empty() const { return state.empty(); }
+    void swap(StSnap& o)
+    {
+        state.swap(o.state);
+        side.swap(o.side);
+    }
 };
 
 struct StStep {
@@ -408,6 +456,7 @@ struct Ripper::Impl {
     bool stop_workers = false;
     bool idle_boot_done = false;
     bool idle_boot_taken = false;
+    bool test_menu_done = false;   // the Aleck64 test menu has been looked at for this ROM
     bool st_mode = false;          // a sound test walk is running: workers only analyse what it queues
     bool st_walking = false;       // ... and it may still queue more
     int next_song_id = 1;
@@ -445,6 +494,8 @@ struct Ripper::Impl {
         // A new cartridge's blank save memory.  Players have none, but they
         // start from a save state taken after the game has done its checks.
         c.cart_saves = opt.save_memory;
+        c.aleck64 = is_aleck64();
+        c.aleck64_dips = opt.aleck64_dips;
         c.eeprom_16k = opt.eeprom_kbit == 16 || (opt.eeprom_kbit == 0 && rom && rom->info().eeprom_16k);
         return c;
     }
@@ -460,6 +511,15 @@ struct Ripper::Impl {
         c.fix_code_mirrors = false;
         c.track_rom = true;
         return c;
+    }
+
+    bool is_aleck64() const
+    {
+        if (opt.hardware == 1)
+            return false;
+        if (opt.hardware == 2)
+            return true;
+        return rom && rom->info().aleck64;
     }
 
     bool budget_over() const
@@ -543,16 +603,38 @@ struct Ripper::Impl {
     void emit_progress(bool finished);
 
     // sound test walk
+    uint16_t st_dips_or = 0;   // DIP switches forced ON while looking at a test menu
     MachineConfig st_config() const
     {
         MachineConfig c = capture_config();
         c.track_rom = false;
+        c.aleck64_dips = (uint16_t)(c.aleck64_dips | st_dips_or);
         return c;
     }
-    bool st_frames(Machine& m, int frames, uint32_t buttons);
-    bool st_advance(const Bytes& cursor, uint32_t key, Bytes& next);
-    bool st_step(const StScheme& scheme, Bytes& cursor, int index, StStep& out);
-    int st_probe(const StScheme& scheme, const Bytes& root);
+    int thread_count() const
+    {
+        int threads = opt.threads;
+        if (threads <= 0) {
+            threads = (int)std::thread::hardware_concurrency();
+            if (threads <= 0)
+                threads = 2;
+            if (threads > 8)
+                threads = 8;
+        }
+        return threads;
+    }
+    std::vector<StScheme> st_schemes() const;
+    bool st_frames(Machine& m, int frames, uint64_t input);
+    bool st_load(Machine& m, const StSnap& snap, const MachineConfig& cfg);
+    bool st_take(Machine& m, StSnap& out);
+    bool st_advance(const StSnap& cursor, uint64_t key, StSnap& next, int extra_settle = 0);
+    bool st_step(const StScheme& scheme, StSnap& cursor, int index, StStep& out, bool allow_short = false);
+    int st_probe(const StScheme& scheme, const StSnap& root);
+    bool st_session(const StSnap& screen, SoundTestResult& result, std::string& err);
+    bool a64_test_menu(SoundTestResult& result, std::string& err);
+    bool mahjong = false;          // the game reads the Aleck64 mahjong panel
+    bool mahjong_known = false;
+    bool detect_mahjong(const StSnap* from = nullptr);
 };
 
 void Ripper::Impl::logf(const char* fmt, ...)
@@ -600,7 +682,7 @@ void Ripper::Impl::explore(std::shared_ptr<Node> node, uint64_t seed, bool idle_
         const Bytes raw = node->state.unpack();
         ok = m.load_state(rom->words(), raw, cfg, err);
         if (ok && node->cart)
-            m.import_cart_save(*node->cart);
+            m.import_side_state(*node->cart);
     }
     if (!ok) {
         logf("explore: %s", err.c_str());
@@ -612,7 +694,8 @@ void Ripper::Impl::explore(std::shared_ptr<Node> node, uint64_t seed, bool idle_
     m.set_audio_sink(&ls);
 
     Rng rng(seed);
-    const int fps = (int)m.vi_rate();
+    // (the core only knows its frame rate once it has run; the cartridge header tells it now)
+    const int fps = rom->info().pal ? 50 : 60;
 
     // Plan: which button style to use when.  An idle stretch after each
     // active one lets whatever music started settle without key clicks.
@@ -644,7 +727,7 @@ void Ripper::Impl::explore(std::shared_ptr<Node> node, uint64_t seed, bool idle_
         }
     }
     size_t phase = 0;
-    InputBot bot(rng.next(), plan[0].style, fps);
+    InputBot bot(rng.next(), plan[0].style, fps, mahjong);
     std::string styles_used = bot_style_name(plan[0].style);
 
     Bytes snap_silent;         // latest state taken while the output was silent
@@ -652,7 +735,7 @@ void Ripper::Impl::explore(std::shared_ptr<Node> node, uint64_t seed, bool idle_
     double snap_silent_t = -1;
     auto grab_cart = [&m]() -> std::shared_ptr<const Bytes> {
         Bytes b;
-        m.export_cart_save(b);
+        m.export_side_state(b);
         if (b.empty())
             return nullptr;
         return std::make_shared<const Bytes>(std::move(b));
@@ -747,7 +830,8 @@ void Ripper::Impl::explore(std::shared_ptr<Node> node, uint64_t seed, bool idle_
                     styles_used += bot_style_name(plan[phase].style);
                 }
             }
-            m.set_buttons(opt.press_buttons ? bot.next() : 0);
+            const uint64_t in = opt.press_buttons ? bot.next() : 0;
+            m.set_input((uint32_t)in, (uint32_t)(in >> 32));
 
             // While it is quiet keep a fresh save state at hand: the next
             // sound to start will want one from just before it.
@@ -796,7 +880,20 @@ Ripper::Impl::Verdict Ripper::Impl::finalize(const Candidate& cand, int* new_id,
         return v;
     };
 
-    const Bytes state = cand.state.unpack();
+    Bytes state = cand.state.unpack();
+    // Aleck64: let the game read "nothing pressed" from RAM instead of
+    // faulting on the board's inputs, which a player does not have.  (Not
+    // for the mahjong games: they write the panel row they want to read to
+    // the same page and would then read their own write back as keys.)
+    bool remapped = false;
+    if (is_aleck64() && !mahjong) {
+        uint32_t in0 = 0xffffffffu;
+        const uint16_t dips = opt.aleck64_dips;
+        for (int i = 0; i < 16; i++)
+            if (dips & (1u << i))
+                in0 &= ~(1u << (i < 8 ? 24 + i : 16 + (i - 8)));
+        remapped = a64_remap_board_io(state, in0) > 0;
+    }
     Machine m;
     Listener ls;
     std::string err;
@@ -1033,7 +1130,10 @@ Ripper::Impl::Verdict Ripper::Impl::finalize(const Candidate& cand, int* new_id,
         rec->rom_blocks = blocks_from_coverage(cov, bytes, rom->words().size(), 256);
     }
     info.hle_ok = m.audio_hle_ok() != 0;
-    rec->state = cand.state;
+    // A player has none of the Aleck64 board; the game takes a TLB miss
+    // whenever it reaches for it (and survived that, as it plays on).
+    info.foreign_hw = is_aleck64() && m.stats().tlb_misses > 0;
+    rec->state = remapped ? PackedState::pack(state) : cand.state;
     info.state_bytes = rec->state.bytes();
     rec->features = tr;
     rec->first_sound = first;
@@ -1061,10 +1161,20 @@ Ripper::Impl::Verdict Ripper::Impl::finalize(const Candidate& cand, int* new_id,
             }
             // An earlier find that turns out to start in the middle of this
             // song is the lesser copy; replace it.
+            for (const auto& s : songs) {
+                if (s->info.origin != SongOrigin::SoundTest || cand.origin == SongOrigin::SoundTest)
+                    continue;
+                // a song taken from the sound test stays as it is, even if
+                // this find has more in front of it
+                const MatchResult mr = find_in(s->features, s->first_sound, s->probe_seconds, tr, dup_limit(info));
+                if (mr.matched)
+                    return fail(Verdict::Duplicate, "already have this one (from the sound test)");
+            }
             for (size_t i = 0; i < songs.size();) {
                 const auto& s = songs[i];
                 const MatchResult mr = find_in(s->features, s->first_sound, s->probe_seconds, tr, dup_limit(info));
-                if (mr.matched && mr.offset_seconds > first + 1.5 && s->info.origin != SongOrigin::Imported) {
+                if (mr.matched && mr.offset_seconds > first + 1.5 && s->info.origin != SongOrigin::Imported &&
+                    s->info.origin != SongOrigin::SoundTest) {
                     removed.push_back(s->info.id);
                     songs.erase(songs.begin() + (std::ptrdiff_t)i);
                 } else {
@@ -1074,7 +1184,7 @@ Ripper::Impl::Verdict Ripper::Impl::finalize(const Candidate& cand, int* new_id,
         }
         info.id = next_song_id++;
         info.order = cand.order >= 0 ? cand.order : 1000000 + info.id;
-        rec->auto_title = cand.title.empty();
+        rec->auto_title = cand.title.empty() || cand.origin == SongOrigin::SoundTest;
         if (!cand.title.empty()) {
             info.title = cand.title;
         } else {
@@ -1166,6 +1276,8 @@ void Ripper::Impl::worker(int index)
         if (do_finalize) {
             std::string why;
             const Verdict v = finalize(cand, nullptr, &why);
+            if ((v == Verdict::Rejected || v == Verdict::Failed || v == Verdict::Duplicate) && !why.empty())
+                logf("analyse: candidate from %.0f s not used: %s", cand.game_time, why.c_str());
             std::lock_guard<std::mutex> lk(mu);
             if (v == Verdict::Duplicate)
                 prog.duplicates++;
@@ -1217,6 +1329,9 @@ void Ripper::set_rom(std::shared_ptr<const Rom> rom)
     impl_->next_node_id = 1;
     impl_->idle_boot_done = false;
     impl_->idle_boot_taken = false;
+    impl_->test_menu_done = false;
+    impl_->mahjong = false;
+    impl_->mahjong_known = false;
     impl_->prog = RipProgress();
 }
 
@@ -1276,29 +1391,45 @@ static bool st_can_snapshot(Machine& m)
     return (m.busy() & ~kBusyAIFull) == 0;
 }
 
-bool Ripper::Impl::st_frames(Machine& m, int frames, uint32_t buttons)
+bool Ripper::Impl::st_frames(Machine& m, int frames, uint64_t input)
 {
     for (int i = 0; i < frames; i++) {
         if (cancel.load(std::memory_order_relaxed))
             return false;
-        m.set_buttons(buttons);
+        m.set_input((uint32_t)input, (uint32_t)(input >> 32));
         if (m.run(kStopVI) & kStopError)
             return false;
     }
     return true;
 }
 
+bool Ripper::Impl::st_load(Machine& m, const StSnap& snap, const MachineConfig& cfg)
+{
+    std::string err;
+    if (!m.load_state(rom->words(), snap.state, cfg, err))
+        return false;
+    m.import_side_state(snap.side);
+    return true;
+}
+
+bool Ripper::Impl::st_take(Machine& m, StSnap& out)
+{
+    if (!st_can_snapshot(m) || !m.snapshot(out.state))
+        return false;
+    m.export_side_state(out.side);
+    return true;
+}
+
 // Presses `key` once and returns the machine after things have settled.
-bool Ripper::Impl::st_advance(const Bytes& cursor, uint32_t key, Bytes& next)
+bool Ripper::Impl::st_advance(const StSnap& cursor, uint64_t key, StSnap& next, int extra_settle)
 {
     Machine m;
-    std::string err;
-    if (!m.load_state(rom->words(), cursor, st_config(), err))
+    if (!st_load(m, cursor, st_config()))
         return false;
-    if (!st_frames(m, 2, 0) || !st_frames(m, kStHold, key) || !st_frames(m, kStSettle, 0))
+    if (!st_frames(m, 2, 0) || !st_frames(m, kStHold, key) || !st_frames(m, kStSettle + extra_settle, 0))
         return false;
     for (int i = 0; i < 120; i++) {
-        if (st_can_snapshot(m) && m.snapshot(next))
+        if (st_take(m, next))
             return true;
         if (!st_frames(m, 1, 0))
             return false;
@@ -1309,17 +1440,17 @@ bool Ripper::Impl::st_advance(const Bytes& cursor, uint32_t key, Bytes& next)
 // Tries entry number `index` (0 = the one selected in `cursor`).  `cursor`
 // is moved on to that entry.  Returns false when the emulation failed or the
 // run was cancelled.
-bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StStep& out)
+bool Ripper::Impl::st_step(const StScheme& scheme, StSnap& cursor, int index, StStep& out, bool allow_short)
 {
     out = StStep();
-    const bool select_plays = scheme.play.buttons == 0;
-    const uint32_t key = select_plays ? scheme.change.buttons : scheme.play.buttons;
+    const bool select_plays = scheme.play.none();
+    const uint64_t key = select_plays ? scheme.change.input() : scheme.play.input();
     const MachineConfig cfg = st_config();
     std::string err;
 
     if (!select_plays && index > 0) {
-        Bytes next;
-        if (!st_advance(cursor, scheme.change.buttons, next))
+        StSnap next;
+        if (!st_advance(cursor, scheme.change.input(), next))
             return false;
         cursor.swap(next);
     }
@@ -1328,7 +1459,7 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
     PcmSink quiet;
     {
         Machine m;
-        if (!m.load_state(rom->words(), cursor, cfg, err))
+        if (!st_load(m, cursor, cfg))
             return false;
         m.set_audio_sink(&quiet);
         while (m.seconds() < kStWindow + 1.6)
@@ -1339,14 +1470,14 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
     // The same again with the key pressed.
     PcmSink loud;
     Machine m;
-    if (!m.load_state(rom->words(), cursor, cfg, err))
+    if (!st_load(m, cursor, cfg))
         return false;
     m.set_audio_sink(&loud);
 
     // candidates for the save state: the last few from before the change
     // (a ring, newest at pre_at) and the first two after it
     const int kPre = 4;
-    Bytes pre[kPre], post[2], settled;
+    StSnap pre[kPre], post[2], settled;
     size_t pre_pos[kPre] = { 0, 0, 0, 0 }, post_pos[2] = { 0, 0 };
     int n_pre = 0, pre_at = -1, n_post = 0;
     bool have_settled = false;
@@ -1381,7 +1512,7 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
         }
         if (!diverged) {
             const int slot = (pre_at + 1) % kPre;
-            if (st_can_snapshot(m) && m.snapshot(pre[slot])) {
+            if (st_take(m, pre[slot])) {
                 pre_at = slot;
                 pre_pos[slot] = loud.frames();
                 if (n_pre < kPre)
@@ -1390,12 +1521,12 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
             if (m.seconds() >= kStWindow)
                 break;
         } else {
-            if (n_post < 2 && st_can_snapshot(m) && m.snapshot(post[n_post])) {
+            if (n_post < 2 && st_take(m, post[n_post])) {
                 post_pos[n_post] = loud.frames();
                 ++n_post;
             }
             const size_t have = loud.frames();
-            if (select_plays && !have_settled && loud.rate && have >= td + loud.rate / 2 && st_can_snapshot(m) && m.snapshot(settled))
+            if (select_plays && !have_settled && loud.rate && have >= td + loud.rate / 2 && st_take(m, settled))
                 have_settled = true;
             if ((loud.rate && have >= td + (size_t)(kStListen * loud.rate)) || m.seconds() > t_div + kStListen + 2.0)
                 break;
@@ -1404,7 +1535,7 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
     if (select_plays) {
         // the next entry is selected from wherever this press left the game
         for (int i = 0; !have_settled && i < 120; i++) {
-            if (st_can_snapshot(m) && m.snapshot(settled))
+            if (st_take(m, settled))
                 have_settled = true;
             else if (!st_frames(m, 1, 0))
                 return false;
@@ -1419,8 +1550,9 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
 
     // A beep for moving the cursor also changes what is heard, but only for
     // a moment: afterwards the two recordings are the same again.  A tune
-    // that was started keeps them apart.
-    {
+    // that was started keeps them apart.  (Looking for a sound test screen,
+    // a short sound counts too: the first entry may be a sound effect.)
+    if (!allow_short) {
         const size_t a = td + loud.rate * 3 / 10;
         const size_t b = std::min(std::min(quiet.frames(), loud.frames()), td + loud.rate * 3 / 2);
         if (b > a + loud.rate / 2) {
@@ -1461,13 +1593,12 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
         fx.feed(quiet.pcm.data() + td * 2, quiet.frames() - td, loud.rate);
         old_print = fx.track();
     }
-    auto plays_alone = [&](const Bytes& snap, size_t pos) -> int {
+    auto plays_alone = [&](const StSnap& snap, size_t pos) -> int {
         const size_t lead = td > pos ? td - pos : 0;
         const size_t need = lead + loud.rate + loud.rate / 4;
         Machine v;
         PcmSink vs;
-        std::string e;
-        if (!v.load_state(rom->words(), snap, cfg, e))
+        if (!st_load(v, snap, cfg))
             return 0;
         v.set_audio_sink(&vs);
         while (vs.frames() < need && v.seconds() < 8.0)
@@ -1484,7 +1615,7 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
     // order of preference: before the change with a little room to spare
     // (so that a dropped audio buffer still belongs to the old sound), then
     // right before the change, then after it
-    std::vector<std::pair<const Bytes*, size_t>> tries;
+    std::vector<std::pair<const StSnap*, size_t>> tries;
     const size_t room = loud.rate / 20;
     for (int pass = 0; pass < 2; pass++) {
         for (int i = 0; i < n_pre; i++) {
@@ -1501,7 +1632,7 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
         if (r < 0)
             return false;
         if (r == 1) {
-            out.state = *t.first;
+            out.state = t.first->state;
             out.captured = true;
             break;
         }
@@ -1510,9 +1641,9 @@ bool Ripper::Impl::st_step(const StScheme& scheme, Bytes& cursor, int index, StS
 }
 
 // How many different sounds the first few entries give with these keys.
-int Ripper::Impl::st_probe(const StScheme& scheme, const Bytes& root)
+int Ripper::Impl::st_probe(const StScheme& scheme, const StSnap& root)
 {
-    Bytes cur = root;
+    StSnap cur = root;
     std::vector<FeatureTrack> prints;
     int distinct = 0, misses = 0;
     for (int k = 0; k < 4; k++) {
@@ -1535,45 +1666,34 @@ int Ripper::Impl::st_probe(const StScheme& scheme, const Bytes& root)
     return distinct;
 }
 
-bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, std::string& err)
+std::vector<StScheme> Ripper::Impl::st_schemes() const
 {
-    Impl& d = *impl_;
-    result = SoundTestResult();
-    if (!d.rom || d.rom->empty()) {
-        err = "no ROM loaded";
-        return false;
-    }
-    if (pj64_state.size() < 8 || rd32le(pj64_state.data()) != 0x23D8A6C8u) {
-        err = "not a Project64 save state";
-        return false;
-    }
-    {
-        Machine m;
-        if (!m.load_state(d.rom->words(), pj64_state, d.st_config(), err))
-            return false;
-    }
-    if (d.is_running.exchange(true)) {
-        err = "busy";
-        return false;
-    }
-
-    int threads = d.opt.threads;
-    if (threads <= 0) {
-        threads = (int)std::thread::hardware_concurrency();
-        if (threads <= 0)
-            threads = 2;
-        if (threads > 8)
-            threads = 8;
-    }
-
-    const StKey right = { kBtnDRight, "D-Pad Right" }, down = { kBtnDDown, "D-Pad Down" };
-    const StKey left = { kBtnDLeft, "D-Pad Left" }, up = { kBtnDUp, "D-Pad Up" };
-    const StKey s_right = { stick(80, 0), "Stick Right" }, s_down = { stick(0, -80), "Stick Down" };
-    const StKey key_a = { kBtnA, "A" }, key_b = { kBtnB, "B" }, key_start = { kBtnStart, "START" }, key_z = { kBtnZ, "Z" };
-    const StKey key_r = { kBtnR, "R" }, c_right = { kBtnCRight, "C Right" }, c_down = { kBtnCDown, "C Down" };
-    const StKey none = { 0, "" };
+    const StKey right = { kBtnDRight, 0, "D-Pad Right" }, down = { kBtnDDown, 0, "D-Pad Down" };
+    const StKey left = { kBtnDLeft, 0, "D-Pad Left" }, up = { kBtnDUp, 0, "D-Pad Up" };
+    const StKey s_right = { stick(80, 0), 0, "Stick Right" }, s_down = { stick(0, -80), 0, "Stick Down" };
+    const StKey key_a = { kBtnA, 0, "A" }, key_b = { kBtnB, 0, "B" }, key_start = { kBtnStart, 0, "START" }, key_z = { kBtnZ, 0, "Z" };
+    const StKey key_r = { kBtnR, 0, "R" }, c_right = { kBtnCRight, 0, "C Right" }, c_down = { kBtnCDown, 0, "C Down" };
+    const StKey test = { 0, kCabTest, "TEST" }, service = { 0, kCabService, "SERVICE" };
+    const StKey none = { 0, 0, "" };
     // most likely first: with equal results the earlier one is used
-    const std::vector<StScheme> schemes = {
+    std::vector<StScheme> v;
+    if (is_aleck64() && mahjong) {
+        // mahjong panel: tile keys move the selection, START or a tile key plays
+        const StKey mj_a = mahjong_key(0), mj_b = mahjong_key(1), mj_c = mahjong_key(2), mj_d = mahjong_key(3);
+        const StKey mj_n = mahjong_key(13);
+        v = { { mj_c, key_start }, { mj_b, key_start }, { mj_d, key_start }, { mj_a, key_start },
+              { mj_c, mj_a }, { mj_b, mj_a }, { mj_d, mj_a }, { mj_n, key_start },
+              { mj_c, none }, { mj_b, none }, { mj_a, none } };
+    }
+    if (is_aleck64()) {
+        // arcade test menus: joystick or the service button moves, a
+        // button, start or the test switch plays
+        const std::vector<StScheme> a64 = { { down, key_a }, { down, key_start }, { down, test }, { service, test }, { down, key_b },
+              { service, key_a }, { service, key_start }, { up, key_a }, { right, key_a }, { up, test },
+              { right, test }, { down, none }, { service, none }, { right, none }, { up, none } };
+        v.insert(v.end(), a64.begin(), a64.end());
+    }
+    const std::vector<StScheme> n64 = {
         { right, key_a },   { down, key_a },     { s_right, key_a },   { s_down, key_a },
         { right, none },    { down, none },      { s_right, none },    { s_down, none },
         { right, key_start }, { down, key_start }, { s_right, key_start }, { s_down, key_start },
@@ -1581,27 +1701,32 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
         { right, key_b },   { down, key_b },     { right, key_z },     { down, key_z },
         { key_a, none },    { left, key_a },     { up, key_a },
     };
+    for (const StScheme& sc : n64) {
+        bool dup = false;
+        for (const StScheme& h : v)
+            if (h.change.input() == sc.change.input() && h.play.input() == sc.play.input())
+                dup = true;
+        if (!dup)
+            v.push_back(sc);
+    }
+    return v;
+}
+
+// Finds out how the sound test screen in `screen` is operated and walks
+// its list (see run_sound_test()).  The caller owns is_running.
+bool Ripper::Impl::st_session(const StSnap& screen, SoundTestResult& result, std::string& err)
+{
+    Impl& d = *this;
+    const int threads = thread_count();
+    const std::vector<StScheme> schemes = st_schemes();
 
     {
         std::lock_guard<std::mutex> lk(d.mu);
-        d.cancel.store(false);
-        d.t_start = Clock::now();
         d.prog.st_phase = 1;
         d.prog.st_entry = 0;
         d.prog.st_keys.clear();
     }
     d.emit_progress(false);
-
-    auto finish = [&d]() {
-        {
-            std::lock_guard<std::mutex> lk(d.mu);
-            d.prog.st_phase = 0;
-            d.st_mode = false;
-            d.st_walking = false;
-        }
-        d.is_running.store(false);
-        d.emit_progress(true);
-    };
 
     // ---- 1. which keys work this screen? --------------------------------
     std::vector<int> score(schemes.size(), 0);
@@ -1615,9 +1740,8 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
                     const size_t i = next.fetch_add(1);
                     if (i >= schemes.size() || d.cancel.load())
                         break;
-                    score[i] = d.st_probe(schemes[i], pj64_state);
-                    d.logf("sound test: %s%s%s -> %d different sound(s)", schemes[i].change.name,
-                           schemes[i].play.buttons ? " + " : "", schemes[i].play.name, score[i]);
+                    score[i] = d.st_probe(schemes[i], screen);
+                    d.logf("sound test: %s -> %d different sound(s)", scheme_name(schemes[i]).c_str(), score[i]);
                 }
             });
         }
@@ -1625,7 +1749,6 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
             t.join();
     }
     if (d.cancel.load()) {
-        finish();
         result.cancelled = true;
         err = "cancelled";
         return false;
@@ -1635,18 +1758,13 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
         if (score[i] > score[best])
             best = i;
     if (score[best] < 2) {
-        finish();
         err = "the screen in this save state does not react like a sound test: no key was found that moves "
               "to another tune and plays it";
         return false;
     }
     const StScheme scheme = schemes[best];
     result.controls_found = true;
-    result.keys = scheme.change.name;
-    if (scheme.play.buttons) {
-        result.keys += ", then ";
-        result.keys += scheme.play.name;
-    }
+    result.keys = scheme_name(scheme);
     d.logf("sound test: using %s", result.keys.c_str());
 
     // ---- 2. walk the list ------------------------------------------------
@@ -1663,7 +1781,7 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
     for (int i = 0; i < threads; i++)
         pool.emplace_back([&d, i] { d.worker(i); });
 
-    Bytes cur = pj64_state;
+    StSnap cur = screen;
     std::vector<FeatureTrack> prints;   // one per different sound, in order
     int misses = 0, repeats = 0;
     for (int k = 0; k < kStMaxEntries && !d.cancel.load(); k++) {
@@ -1678,6 +1796,7 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
             break;
         result.entries = k + 1;
         if (!st.captured) {
+            d.logf("explore: sound test entry %d: %s", k + 1, st.reacted ? "sounds, but no save state plays it by itself" : "no new sound");
             // an empty slot; a few of those in a row and the list is over
             if (++misses >= 8)
                 break;
@@ -1685,16 +1804,20 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
         }
         misses = 0;
         if (!prints.empty() && similarity(st.print, prints.back(), 2.5) >= kStSame) {
+            d.logf("explore: sound test entry %d: same as the one before", k + 1);
             // the selection no longer moves: end of a list that does not wrap
             if (++repeats >= 3)
                 break;
             continue;
         }
+        d.logf("explore: sound test entry %d: new sound", k + 1);
         repeats = 0;
         prints.push_back(st.print);
         const size_t n = prints.size();
-        if (n >= 4 && similarity(prints[n - 1], prints[1], 2.5) >= kStSame && similarity(prints[n - 2], prints[0], 2.5) >= kStSame)
+        if (n >= 4 && similarity(prints[n - 1], prints[1], 2.5) >= kStSame && similarity(prints[n - 2], prints[0], 2.5) >= kStSame) {
+            d.logf("explore: sound test entry %d: the list has come round", k + 1);
             break;   // been round once
+        }
 
         Candidate c;
         c.state = PackedState::pack(st.state);
@@ -1728,9 +1851,301 @@ bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, st
     }
     for (std::thread& t : pool)
         t.join();
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.st_mode = false;
+    }
     result.cancelled = d.cancel.load();
-    finish();
     return true;
+}
+
+// --------------------------------------------------------------------------
+// Aleck64 test mode.  Every Aleck64 game has a test menu (DIP switch SW2-8
+// ON at power-on, or the test switch); one of its items is usually a sound
+// test.  The menu is reached both ways, the cursor is moved down item by
+// item (with the joystick, or with the service button), each item is
+// entered with the test switch, and the first screen that behaves like a
+// sound test is walked like a user supplied sound test state.
+// --------------------------------------------------------------------------
+bool Ripper::Impl::a64_test_menu(SoundTestResult& result, std::string& err)
+{
+    Impl& d = *this;
+    const int threads = thread_count();
+    const int kItems = 16;
+    const StKey test = { 0, kCabTest, "TEST" };
+    const StKey moves[] = { { kBtnDDown, 0, "D-Pad Down" }, { 0, kCabService, "SERVICE" } };
+    std::vector<StKey> plays = { { kBtnA, 0, "A" }, { kBtnStart, 0, "START" }, { 0, kCabTest, "TEST" },
+                                 { kBtnB, 0, "B" }, { 0, kCabService, "SERVICE" } };
+    if (d.mahjong)
+        plays.push_back(mahjong_key(0));
+    const StKey none = { 0, 0, "" };
+    const int kMaxSessions = 6;            // screens tried as a sound test at most
+    int sessions = 0;
+    // what the screens that were no sound test played, and with which key
+    std::vector<std::pair<int, FeatureTrack>> failed;
+    // Screens that make sound but can not be walked (a "sound test" that
+    // plays one fixed tune, a speaker check...): if nothing better turns up
+    // they are handed to the analysis as they are.
+    std::vector<StSnap> single;
+    std::vector<FeatureTrack> single_prints;
+    std::vector<std::string> single_how;
+
+    // power on, wait, (press TEST,) wait; returns a state on the test menu
+    auto reach_menu = [&](bool by_dip, StSnap& out) -> bool {
+        d.st_dips_or = by_dip ? 0x8000 : 0;   // bit 15 = SW2-8
+        Machine m;
+        std::string e;
+        if (!m.power_on(rom->words(), d.st_config(), e))
+            return false;
+        // Waits by emulated time, not by frames: while IPL3 checks the
+        // cartridge (seconds on an Aleck64) the video is not set up yet and
+        // "frames" come thousands of times a second.
+        auto wait_until = [&](double seconds, uint64_t input) {
+            while (m.seconds() < seconds)
+                if (!d.st_frames(m, 1, input))
+                    return false;
+            return true;
+        };
+        double t = 0;
+        if (!by_dip) {
+            if (!wait_until(8.0, 0))
+                return false;
+            t = m.seconds();
+            if (!wait_until(t + 0.2, test.input()))
+                return false;
+        }
+        if (!wait_until(m.seconds() + 10.0, 0))
+            return false;
+        for (int i = 0; i < 240; i++) {
+            if (d.st_take(m, out))
+                return true;
+            if (!d.st_frames(m, 1, 0))
+                return false;
+        }
+        return false;
+    };
+
+    // One way of getting into the items of the menu: the state just before
+    // the key that opens an item, that key, and how to say it.
+    struct Item {
+        StSnap base;
+        StKey enter;
+        std::string how;
+    };
+
+    for (int way = 0; way < 2 && !d.cancel.load(); way++) {
+        StSnap menu;
+        if (!reach_menu(way == 0, menu))
+            continue;
+        d.logf("test menu: reached by %s", way == 0 ? "DIP switch SW2-8" : "the test switch");
+        // a mahjong game is run from its panel: try its keys first
+        const std::vector<int> navs = d.mahjong ? std::vector<int>{ 2, 0, 1 } : std::vector<int>{ 0, 1 };
+        for (int nav : navs) {
+            if (d.cancel.load())
+                break;
+            std::vector<Item> items;
+            if (nav < 2) {
+                // a cursor that moves down the list, the test switch enters
+                const StKey& move = moves[nav];
+                StSnap cur = menu;
+                for (int k = 0; k < kItems && !d.cancel.load(); k++) {
+                    if (k > 0) {
+                        StSnap next;
+                        if (!d.st_advance(cur, move.input(), next)) {
+                            d.logf("explore: test menu: could not move the cursor (%s) past item %d", move.name, k);
+                            break;
+                        }
+                        cur.swap(next);
+                    }
+                    Item it;
+                    it.base = cur;
+                    it.enter = test;
+                    it.how = k ? std::string(move.name) + " x" + std::to_string(k) + ", then TEST" : std::string("TEST");
+                    items.push_back(std::move(it));
+                }
+            }
+            else {
+                // mahjong panel: each item has its own key (A, B, C...)
+                for (int k = 0; k < 14; k++) {
+                    Item it;
+                    it.base = menu;
+                    it.enter = mahjong_key(k);
+                    it.how = it.enter.name;
+                    items.push_back(std::move(it));
+                }
+            }
+            const char* nav_name = nav < 2 ? moves[nav].name : "mahjong keys";
+
+            // enter every item and see whether some key makes it play something
+            std::vector<StSnap> screen(items.size());
+            std::vector<int> sounding(items.size(), 0);
+            std::vector<FeatureTrack> heard(items.size());
+            std::vector<int> heard_key(items.size(), -1);
+            std::atomic<size_t> next{ 0 };
+            std::vector<std::thread> pool;
+            for (int t = 0; t < std::min<int>(threads, (int)items.size()); t++) {
+                pool.emplace_back([&] {
+                    for (;;) {
+                        const size_t k = next.fetch_add(1);
+                        if (k >= items.size() || d.cancel.load())
+                            break;
+                        {
+                            std::lock_guard<std::mutex> lk(d.mu);
+                            d.prog.st_phase = 3;
+                            d.prog.st_entry = (int)k + 1;
+                        }
+                        StSnap inside;
+                        if (!d.st_advance(items[k].base, items[k].enter.input(), inside, 60)) {
+                            d.logf("explore: test menu item %d (%s): could not enter it", (int)k + 1, nav_name);
+                            continue;
+                        }
+                        for (int pi = 0; pi < (int)plays.size(); pi++) {
+                            StSnap cur = inside;
+                            StStep st;
+                            if (!d.st_step(StScheme{ none, plays[pi] }, cur, 0, st, true))
+                                break;
+                            if (st.reacted)
+                                d.logf("explore: test menu item %d (%s), %s: reacts%s", (int)k + 1, nav_name, plays[pi].name,
+                                       st.captured ? ", plays by itself" : ", but no save state plays it by itself");
+                            if (st.captured) {
+                                sounding[k] = 1;
+                                heard[k] = std::move(st.print);
+                                heard_key[k] = pi;
+                                break;
+                            }
+                        }
+                        screen[k] = std::move(inside);
+                    }
+                });
+            }
+            for (std::thread& t : pool)
+                t.join();
+            d.emit_progress(false);
+            for (size_t k = 0; k < items.size(); k++) {
+                if (!sounding[k] || single.size() >= 8)
+                    continue;
+                bool seen = false;
+                for (const FeatureTrack& f : single_prints)
+                    if (similarity(heard[k], f, 2.5) >= kStSame)
+                        seen = true;
+                if (!seen) {
+                    single.push_back(screen[k]);
+                    single_prints.push_back(heard[k]);
+                    single_how.push_back(items[k].how);
+                }
+            }
+            for (size_t k = 0; k < items.size() && !d.cancel.load(); k++) {
+                if (!sounding[k])
+                    continue;
+                // the same sound as an item that was no sound test: the same
+                // screen again (the cursor did not move), or the game itself
+                bool known = false;
+                for (const auto& f : failed)
+                    if (f.first == heard_key[k] && similarity(heard[k], f.second, 2.5) >= kStSame)
+                        known = true;
+                if (known)
+                    continue;
+                if (sessions >= kMaxSessions)
+                    break;
+                ++sessions;
+                d.logf("test menu: item %d (%s) makes sound, trying it as a sound test", (int)k + 1, items[k].how.c_str());
+                SoundTestResult r;
+                std::string e;
+                if (d.st_session(screen[k], r, e)) {
+                    result = r;
+                    result.menu_item = (int)k + 1;
+                    result.menu_keys = items[k].how;
+                    d.st_dips_or = 0;
+                    return true;
+                }
+                if (r.cancelled)
+                    break;
+                failed.emplace_back(heard_key[k], heard[k]);
+            }
+        }
+    }
+    d.st_dips_or = 0;
+    result.cancelled = d.cancel.load();
+    err = result.cancelled ? "cancelled" : "no sound test was found in the test menu";
+    if (!result.cancelled && !single.empty()) {
+        // what those screens play goes to the analysis like any other find
+        // (the exploration's workers pick it up)
+        for (size_t i = 0; i < single.size(); i++)
+            d.logf("test menu: the screen at %s plays something by itself; it is analysed as a song", single_how[i].c_str());
+        std::lock_guard<std::mutex> lk(d.mu);
+        for (size_t i = 0; i < single.size(); i++) {
+            Candidate c;
+            c.state = PackedState::pack(single[i].state);
+            c.origin = SongOrigin::SoundTest;
+            c.order = (int)i;
+            d.prog.candidates++;
+            d.queue.push_back(std::move(c));
+        }
+    }
+    return false;
+}
+
+// Does the game read the mahjong control panel?  Then the panel's keys are
+// tried too (sound test, test menu, the automatic player).
+bool Ripper::Impl::detect_mahjong(const StSnap* from)
+{
+    Machine m;
+    std::string e;
+    if (from) {
+        if (!st_load(m, *from, st_config()))
+            return false;
+    }
+    else if (!m.power_on(rom->words(), st_config(), e))
+        return false;
+    const double until = m.seconds() + (from ? 2.0 : 12.0);
+    while (m.seconds() < until && !cancel.load())
+        if (!st_frames(m, 1, 0))
+            break;
+    return m.stats().a64_mj_reads > 0;
+}
+
+bool Ripper::run_sound_test(const Bytes& pj64_state, SoundTestResult& result, std::string& err)
+{
+    Impl& d = *impl_;
+    result = SoundTestResult();
+    if (!d.rom || d.rom->empty()) {
+        err = "no ROM loaded";
+        return false;
+    }
+    if (pj64_state.size() < 8 || rd32le(pj64_state.data()) != 0x23D8A6C8u) {
+        err = "not a Project64 save state";
+        return false;
+    }
+    {
+        Machine m;
+        if (!m.load_state(d.rom->words(), pj64_state, d.st_config(), err))
+            return false;
+    }
+    if (d.is_running.exchange(true)) {
+        err = "busy";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.cancel.store(false);
+        d.t_start = Clock::now();
+    }
+    StSnap start;
+    start.state = pj64_state;
+    if (d.is_aleck64()) {
+        d.mahjong = d.detect_mahjong(&start);
+        d.mahjong_known = true;
+    }
+    const bool ok = d.st_session(start, result, err);
+    {
+        std::lock_guard<std::mutex> lk(d.mu);
+        d.prog.st_phase = 0;
+        d.st_mode = false;
+        d.st_walking = false;
+    }
+    d.is_running.store(false);
+    d.emit_progress(true);
+    return ok;
 }
 
 void Ripper::run()
@@ -1770,6 +2185,46 @@ void Ripper::run()
     const RomInfo& ri = d.rom->info();
     d.logf("ROM: \"%s\" %s, %u KB, CIC %s, %s", ri.internal_name.c_str(), ri.game_code.c_str(), (unsigned)(ri.size / 1024),
            ri.cic.c_str(), ri.pal ? "PAL" : "NTSC");
+    if (d.is_aleck64())
+        d.logf("hardware: Aleck64 arcade board (START also drops a coin), DIP switches on: %04x", (unsigned)d.opt.aleck64_dips);
+
+    // Aleck64: a mahjong game is driven from the mahjong control panel
+    if (d.is_aleck64() && !d.mahjong_known) {
+        d.mahjong = d.detect_mahjong();
+        d.mahjong_known = true;
+        if (d.mahjong)
+            d.logf("hardware: the game reads the mahjong control panel; its keys are pressed too");
+    }
+    // Aleck64: first try the sound test in the test menu (once per ROM)
+    if (d.is_aleck64() && d.opt.aleck64_test_menu && !d.test_menu_done) {
+        d.test_menu_done = true;
+        SoundTestResult r;
+        std::string err;
+        if (d.a64_test_menu(r, err))
+            d.logf("test menu: sound test at item %d (%s); keys %s; %d entries tried, %d analysed",
+                   r.menu_item, r.menu_keys.c_str(), r.keys.c_str(), r.entries, r.sounds);
+        else
+            d.logf("test menu: %s", err.c_str());
+        {
+            std::lock_guard<std::mutex> lk(d.mu);
+            d.prog.st_phase = 0;
+            d.st_mode = false;
+            d.st_walking = false;
+            d.stop_workers = false;
+            d.active = 0;
+            d.prog.test_menu_songs = r.sounds;
+            d.prog.test_menu_found = r.controls_found;
+            // the search time the user chose is for the exploration
+            d.t_start = Clock::now();
+        }
+        if (d.listener)
+            d.listener->on_test_menu(r);
+    }
+    if (d.cancel.load()) {
+        d.is_running.store(false);
+        d.emit_progress(true);
+        return;
+    }
     d.logf("exploring with %d thread(s)%s", threads, d.opt.press_buttons ? "" : ", without pressing buttons");
 
     std::vector<std::thread> pool;
@@ -2026,7 +2481,11 @@ bool Ripper::write_set(const Path& dir, const SetTags& tags, const std::vector<i
             char auto_name[32], out_name[32];
             std::snprintf(auto_name, sizeof(auto_name), "Track %02d", s.info.id);
             std::snprintf(out_name, sizeof(out_name), "Track %0*d", digits, (int)i + 1);
-            if (s.auto_title && title == auto_name)
+            bool numbered = title.compare(0, 6, "Track ") == 0 && title.size() > 6;
+            for (size_t c = 6; c < title.size(); c++)
+                if (title[c] < '0' || title[c] > '9')
+                    numbered = false;
+            if (s.auto_title && (title == auto_name || numbered))
                 title = out_name;
         }
         t.emplace_back("title", title);

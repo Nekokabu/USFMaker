@@ -80,6 +80,9 @@ struct usfx_stats
     uint64_t eeprom_cmds;       /* EEPROM commands answered                  */
     uint64_t save_dmas;         /* SRAM / FlashRAM transfers                 */
     uint64_t flash_cmds;        /* FlashRAM commands                         */
+    uint64_t foreign_accesses;  /* loads/stores that reached the Aleck64 board through the TLB */
+    uint64_t tlb_misses;        /* TLB refill exceptions raised for data accesses */
+    uint64_t a64_mj_reads;      /* reads of the Aleck64 mahjong panel        */
 };
 
 /* ---- cartridge save hardware ---------------------------------------------
@@ -113,6 +116,27 @@ struct usfx_cart_save
     uint8_t *flash;
 };
 
+/* ---- Seta / Nintendo Aleck64 arcade board ---------------------------------
+ * An N64 with extra hardware that the games reach through the TLB at
+ * physical addresses an N64 does not have (the layout follows MAME):
+ *   0xC0000000-0xC07FFFFF  8 MB of SDRAM
+ *   0xC0800000-0xC0800FFF  DIP switches, coin / service / start inputs
+ *                          (word 0: IN0, word 1: IN1, word 2: mahjong panel)
+ *   anything else          reads 0, writes are ignored
+ * The cartridges carry a CIC-NUS-5101.  None of this exists in a USF player;
+ * the save state format has no room for the SDRAM either (it is carried
+ * separately by usfx_aleck64_export()/import() while exploring).
+ */
+#define USFX_A64_SDRAM_BYTES 0x800000
+
+struct usfx_aleck64
+{
+    int enabled;
+    uint32_t in0, in1, inmj;    /* input port values as the game reads them (active low) */
+    uint32_t dip_read_offset;   /* selects the part of the mahjong panel that word 2 returns */
+    uint32_t *sdram;            /* allocated on first use, host order 32 bit words */
+};
+
 /* Per-state extension block; lives at the end of struct usf_state. */
 struct usfx_state
 {
@@ -141,6 +165,7 @@ struct usfx_state
     struct usfx_stats stats;
 
     struct usfx_cart_save cart;
+    struct usfx_aleck64 a64;
 };
 
 /* Size in bytes of a Project64 save state for the given RDRAM size. */
@@ -185,6 +210,19 @@ size_t usfx_cart_save_max(void);
 size_t usfx_cart_save_export(void *state, uint8_t *out, size_t capacity);
 int usfx_cart_save_import(void *state, const uint8_t *data, size_t size);
 
+/* Aleck64 hardware (see struct usfx_aleck64).  Off by default.  Enabling
+   it also applies, at the next cold boot, the IPL3 patch MAME uses for
+   every Aleck64 cartridge. */
+void usfx_set_aleck64(void *state, int enable);
+void usfx_set_aleck64_inputs(void *state, uint32_t in0, uint32_t in1, uint32_t inmj);
+/* SDRAM contents and board registers, to carry from a snapshot to the
+   machine it is loaded into (like the cartridge save memory).  Export
+   returns the number of bytes written (0: nothing worth carrying, or the
+   buffer is too small - usfx_aleck64_max() bytes always suffice). */
+size_t usfx_aleck64_max(void);
+size_t usfx_aleck64_export(void *state, uint8_t *out, size_t capacity);
+int usfx_aleck64_import(void *state, const uint8_t *data, size_t size);
+
 /* Runs the machine until one of the events in stop_mask happens.
    Returns the USFX_STOP_* bits that fired.  On USFX_STOP_ERROR the message
    is available from usfx_last_error(). */
@@ -227,6 +265,9 @@ int usfx_cart_pi_dma(struct usf_state *state, int to_cart, uint32_t cart_addr, u
 int usfx_cart_read_status(void *opaque, uint32_t address, uint32_t *value);
 int usfx_cart_write_command(void *opaque, uint32_t address, uint32_t value, uint32_t mask);
 void usfx_cart_free(struct usf_state *state);
+int usfx_a64_read(void *opaque, uint32_t address, uint32_t *value);
+int usfx_a64_write(void *opaque, uint32_t address, uint32_t value, uint32_t mask);
+void usfx_a64_free(struct usf_state *state);
 
 #ifdef __cplusplus
 }

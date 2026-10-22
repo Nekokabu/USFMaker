@@ -194,10 +194,33 @@ static void osal_fastcall write_nothingd(usf_state_t * state)
 {
 }
 
+/* USFX: with the Aleck64 board enabled, tlb_map() lets pages through that
+   point at physical addresses beyond the N64's 512 MB (0xC0000000 and up).
+   Their lookup table entries look like KSEG2/KSEG3 addresses, whose handlers
+   are these very functions; such an address goes to the board instead of
+   being translated a second time.  Stock lazyusf2 never maps those pages, so
+   for it nothing changes: the game takes a TLB miss, as in a USF player.
+   Returns 2 when the board handles state->address, 0 otherwise. */
+static int usfx_foreign(usf_state_t * state, int w)
+{
+    (void)w;
+    if ((state->address & 0xc0000000u) == 0xc0000000u && state->usfx.a64.enabled)
+    {
+        state->usfx.stats.foreign_accesses++;
+        return 2;
+    }
+    return 0;
+}
+
 static void osal_fastcall read_nomem(usf_state_t * state)
 {
     state->address = virtual_to_physical_address(state,state->address,0);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 0))
+    {
+    case 1: *state->rdword = 0; return;
+    case 2: readw(usfx_a64_read, state, state->address, state->rdword); return;
+    }
     read_word_in_memory();
 }
 
@@ -205,6 +228,11 @@ static void osal_fastcall read_nomemb(usf_state_t * state)
 {
     state->address = virtual_to_physical_address(state,state->address,0);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 0))
+    {
+    case 1: *state->rdword = 0; return;
+    case 2: readb(usfx_a64_read, state, state->address, state->rdword); return;
+    }
     read_byte_in_memory();
 }
 
@@ -212,6 +240,11 @@ static void osal_fastcall read_nomemh(usf_state_t * state)
 {
     state->address = virtual_to_physical_address(state,state->address,0);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 0))
+    {
+    case 1: *state->rdword = 0; return;
+    case 2: readh(usfx_a64_read, state, state->address, state->rdword); return;
+    }
     read_hword_in_memory();
 }
 
@@ -219,6 +252,11 @@ static void osal_fastcall read_nomemd(usf_state_t * state)
 {
     state->address = virtual_to_physical_address(state,state->address,0);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 0))
+    {
+    case 1: *state->rdword = 0; return;
+    case 2: readd(usfx_a64_read, state, state->address, state->rdword); return;
+    }
     read_dword_in_memory();
 }
 
@@ -227,6 +265,11 @@ static void osal_fastcall write_nomem(usf_state_t * state)
     invalidate_code(state,state->address);
     state->address = virtual_to_physical_address(state,state->address,1);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 1))
+    {
+    case 1: return;
+    case 2: writew(usfx_a64_write, state, state->address, state->cpu_word); return;
+    }
     write_word_in_memory();
 }
 
@@ -235,6 +278,11 @@ static void osal_fastcall write_nomemb(usf_state_t * state)
     invalidate_code(state,state->address);
     state->address = virtual_to_physical_address(state,state->address,1);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 1))
+    {
+    case 1: return;
+    case 2: writeb(usfx_a64_write, state, state->address, state->cpu_byte); return;
+    }
     write_byte_in_memory();
 }
 
@@ -243,6 +291,11 @@ static void osal_fastcall write_nomemh(usf_state_t * state)
     invalidate_code(state,state->address);
     state->address = virtual_to_physical_address(state,state->address,1);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 1))
+    {
+    case 1: return;
+    case 2: writeh(usfx_a64_write, state, state->address, state->cpu_hword); return;
+    }
     write_hword_in_memory();
 }
 
@@ -251,6 +304,11 @@ static void osal_fastcall write_nomemd(usf_state_t * state)
     invalidate_code(state,state->address);
     state->address = virtual_to_physical_address(state,state->address,1);
     if (state->address == 0x00000000) return;
+    switch (usfx_foreign(state, 1))
+    {
+    case 1: return;
+    case 2: writed(usfx_a64_write, state, state->address, state->cpu_dword); return;
+    }
     write_dword_in_memory();
 }
 

@@ -190,4 +190,55 @@ std::string state_title_from_path(const Path& path)
     return name;
 }
 
+// ---- Aleck64 ----------------------------------------------------------
+int a64_remap_board_io(Bytes& state, uint32_t in0)
+{
+    const size_t kTlb = 0x49C, kRdram = 0x75C;
+    if (state.size() < kRdram || rd32le(state.data()) != 0x23D8A6C8u)
+        return 0;
+    const uint32_t rdram_size = rd32le(state.data() + 4);
+    if (rdram_size < 0x400000 || state.size() < kRdram + rdram_size)
+        return 0;
+    // which TLB pages (4 KB ones only) point at the board's I/O space?
+    std::vector<size_t> hits;
+    for (int i = 0; i < 32; i++) {
+        const uint8_t* e = state.data() + kTlb + (size_t)i * 20;
+        const uint32_t mask = rd32le(e + 4);
+        if (mask != 0)
+            continue;
+        for (int half = 0; half < 2; half++) {
+            const uint32_t lo = rd32le(e + 12 + half * 4);
+            if (!(lo & 2))
+                continue;   // not valid
+            const uint32_t phys = (uint32_t)(((uint64_t)((lo & 0x3FFFFFC0u) >> 6) << 12) & 0xFFFFFFFFu);
+            if (phys >= 0xC0800000u && phys < 0xC1000000u)
+                hits.push_back(kTlb + (size_t)i * 20 + 12 + half * 4);
+        }
+    }
+    if (hits.empty())
+        return 0;
+    // a page of RDRAM nobody uses: the highest one that is all zero
+    uint32_t page = 0;
+    for (uint32_t a = rdram_size - 0x1000; a >= 0x200000; a -= 0x1000) {
+        const uint8_t* p = state.data() + kRdram + a;
+        bool zero = true;
+        for (size_t k = 0; k < 0x1000 && zero; k++)
+            zero = p[k] == 0;
+        if (zero) {
+            page = a;
+            break;
+        }
+    }
+    if (!page)
+        return 0;
+    uint8_t* p = state.data() + kRdram + page;
+    std::memset(p, 0xFF, 0x1000);
+    wr32le(p, in0);
+    for (size_t at : hits) {
+        const uint32_t lo = rd32le(state.data() + at);
+        wr32le(state.data() + at, (lo & 0x3Fu) | ((page >> 12) << 6));
+    }
+    return (int)hits.size();
+}
+
 } // namespace usfm
