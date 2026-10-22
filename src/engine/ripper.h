@@ -44,6 +44,9 @@ struct RipOptions {
     int max_songs = 200;
     bool save_memory = true;              // give the game blank EEPROM / SRAM / FlashRAM while exploring
     int eeprom_kbit = 0;                  // 4 or 16; 0 = decide by the game's product code
+    int hardware = 0;                     // 0 = decide by the cartridge, 1 = N64, 2 = Aleck64 arcade board
+    uint16_t aleck64_dips = 0;            // Aleck64 DIP switches that are ON (bit n = switch n+1; SW1, then SW2)
+    bool aleck64_test_menu = true;        // Aleck64: before exploring, look for the sound test in the test menu
 
     // --- song analysis ---
     double max_render_seconds = 480;      // how much of a song to render when looking for its loop
@@ -81,6 +84,8 @@ struct SongInfo {
     bool hle_ok = true;                   // false: uses audio microcode the fast (HLE) path does not know
     bool stalls = false;                  // the game stops producing sound after the tagged length
     int order = 0;                        // position in the list (sound test entries come in menu order)
+    bool foreign_hw = false;              // Aleck64: while playing, the game reached for board hardware a USF
+                                          // player does not have (and went on playing regardless)
 };
 
 struct RipProgress {
@@ -95,9 +100,12 @@ struct RipProgress {
     bool exploring = false;
     bool finished = false;
     // sound test walk (run_sound_test)
-    int st_phase = 0;                     // 0 not running, 1 finding out the controls, 2 walking the list
+    int st_phase = 0;                     // 0 not running, 1 finding out the controls, 2 walking the list,
+                                          // 3 looking through the Aleck64 test menu (st_entry = item)
     int st_entry = 0;                     // entry being tried (1 = the one selected in the save state)
     std::string st_keys;                  // controls in use, e.g. "D-Pad Right, then A"
+    int test_menu_songs = 0;              // entries the Aleck64 test menu's sound test gave
+    bool test_menu_found = false;
 };
 
 struct SoundTestResult {
@@ -106,6 +114,8 @@ struct SoundTestResult {
     std::string keys;                     // "<select>, then <play>"
     int entries = 0;                      // entries tried
     int sounds = 0;                       // entries that produced a new sound
+    int menu_item = 0;                    // Aleck64 test menu: item the sound test was found at (1 = first)
+    std::string menu_keys;                // ... and how it was reached
 };
 
 struct SetTags {
@@ -132,6 +142,8 @@ public:
     virtual void on_progress(const RipProgress& p) { (void)p; }
     virtual void on_song_added(const SongInfo& song) { (void)song; }
     virtual void on_song_removed(int id) { (void)id; }
+    // Aleck64: the test menu was looked at (before the exploration starts).
+    virtual void on_test_menu(const SoundTestResult& r) { (void)r; }
 };
 
 class Ripper {

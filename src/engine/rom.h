@@ -13,10 +13,11 @@ struct RomInfo {
     bool pal = false;            // 50 Hz game
     uint32_t crc1 = 0, crc2 = 0;
     uint32_t entry_point = 0;
-    std::string cic;             // "6102", "6105", ... or "unknown"
+    std::string cic;             // "6102", "6105", "5101" (Aleck64) ... or "unknown"
     std::string source_format;   // "z64", "v64" or "n64" - how the file was stored
     size_t size = 0;             // size of the image in bytes
     bool eeprom_16k = false;     // known to carry a 16 kbit EEPROM (most EEPROM games have 4 kbit)
+    bool aleck64 = false;        // a Seta/Nintendo Aleck64 arcade cartridge (CIC-NUS-5101)
 };
 
 class Rom {

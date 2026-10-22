@@ -172,6 +172,10 @@ m64p_error main_start(usf_state_t * state)
         /* USFX: cold boot.  r4300_reset_soft() above left the machine exactly
            as the PIF boot ROM would; all that remains is to enter IPL3. */
         state->g_ai.samples_format_changed = 1;
+        /* USFX: what MAME does to every Aleck64 cartridge before booting it
+           ("rom[0x67c..0x67f] = 0"); IPL3 runs from SP DMEM */
+        if (state->usfx.a64.enabled && state->g_si.pif.cic.version == CIC_5101)
+            state->g_sp.mem[0x67c / 4] = 0;
         state->last_addr = 0xa4000040;
         generic_jump_to(state, state->last_addr);
     }

@@ -24,6 +24,19 @@ enum : uint32_t {
     kBtnL = 0x2000, kBtnR = 0x1000,
     kBtnCUp = 0x0800, kBtnCDown = 0x0400, kBtnCLeft = 0x0200, kBtnCRight = 0x0100,
 };
+// Arcade cabinet switches (Aleck64 only; ignored on an N64).
+enum : uint32_t {
+    kCabTest = 0x01,      // test switch on the board
+    kCabService = 0x02,   // service button
+    kCabCoin = 0x04,      // coin 1
+    // mahjong control panel (Super Real Mahjong VS, Hi Pai Paradise...)
+    kCabMjA = 0x100, kCabMjB = 0x200, kCabMjC = 0x400, kCabMjD = 0x800,
+    kCabMjE = 0x1000, kCabMjF = 0x2000, kCabMjG = 0x4000, kCabMjH = 0x8000,
+    kCabMjI = 0x10000, kCabMjJ = 0x20000, kCabMjK = 0x40000, kCabMjL = 0x80000,
+    kCabMjM = 0x100000, kCabMjN = 0x200000, kCabMjKan = 0x400000, kCabMjPon = 0x800000,
+    kCabMjChi = 0x1000000, kCabMjReach = 0x2000000, kCabMjRon = 0x4000000,
+};
+
 inline uint32_t stick(int x, int y) { return (((uint32_t)(uint8_t)(int8_t)x) << 16) | (((uint32_t)(uint8_t)(int8_t)y) << 24); }
 
 // Reasons a save state is not safe to take right now (core's USFX_BUSY_*).
@@ -51,6 +64,11 @@ struct MachineConfig {
     // wait forever if nothing answers.
     bool cart_saves = false;
     bool eeprom_16k = false;          // the EEPROM is a 16 kbit part (default 4 kbit)
+    // The Aleck64 arcade board's extra hardware (SDRAM, DIP switches, coin
+    // and start inputs).  Its inputs follow the buttons: START also drops a
+    // coin and presses the cabinet's start button.
+    bool aleck64 = false;
+    uint16_t aleck64_dips = 0;        // bit n = DIP switch n+1 ON (bits 0-7 SW1, 8-15 SW2)
 };
 
 class AudioSink {
@@ -85,7 +103,9 @@ public:
 
     void set_audio_sink(AudioSink* sink) { audio_ = sink; }
     void set_pi_dma_sink(PiDmaSink* sink) { pi_ = sink; }
-    void set_buttons(uint32_t buttons);
+    void set_buttons(uint32_t buttons) { set_input(buttons, 0); }
+    // Controller buttons plus cabinet switches (kCab*).
+    void set_input(uint32_t buttons, uint32_t cabinet);
 
     // Runs until one of the kStop* events in `mask` happens; returns which.
     int run(int mask);
@@ -103,12 +123,12 @@ public:
     uint32_t pc() const;
     int audio_hle_ok() const;        // 1 yes, 0 the HLE fell back to the interpreter, -1 unknown
 
-    // The cartridge save memory is not part of a save state.  To continue a
-    // game from a snapshot with what it has "saved" so far, take this along
-    // and hand it to the machine the snapshot is loaded into.  An empty
-    // buffer means "still blank".
-    void export_cart_save(Bytes& out) const;
-    void import_cart_save(const Bytes& data);
+    // Hardware state a Project64 save state has no room for: the cartridge
+    // save memory, and the Aleck64 board's SDRAM.  To continue a game from a
+    // snapshot, take this along and hand it to the machine the snapshot is
+    // loaded into.  An empty buffer means "nothing beyond the save state".
+    void export_side_state(Bytes& out) const;
+    void import_side_state(const Bytes& data);
 
     // Bitmap, one bit per 32 bit cartridge word that has been read.
     const uint8_t* rom_coverage(size_t* bytes) const;
@@ -116,6 +136,8 @@ public:
 
 private:
     bool prepare(const Bytes& rom_words, const MachineConfig& cfg, std::string& err);
+    bool aleck64_ = false;
+    uint16_t dips_ = 0;
     static void audio_thunk(void* user, const int16_t* stereo, size_t frames, uint32_t rate);
     static void pi_thunk(void* user, uint32_t cart, uint32_t dram, uint32_t length);
 

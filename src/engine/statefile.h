@@ -23,4 +23,14 @@ std::string state_title_from_path(const Path& path);
 enum class FileKind { Unknown, Rom, SaveState };
 FileKind sniff_file(const Path& path);
 
+// Aleck64: a USF player has none of the arcade board, so a game that reads
+// its inputs through the TLB (at physical 0xC0800000+) takes a TLB miss
+// there, and some games stop running when that happens.  This rewrites the
+// state's TLB entries for the board's I/O pages so that they point at a
+// spare page of RDRAM holding "nothing pressed" (`in0`: the first input word
+// with the DIP switches as set, everything else all ones).  The SDRAM is
+// left alone.  Returns the number of TLB pages remapped (0 = nothing to do
+// or no spare page).
+int a64_remap_board_io(Bytes& state, uint32_t in0);
+
 } // namespace usfm

@@ -69,6 +69,14 @@ enum StrId {
     S_LOG_ST_KEYS,           // keys, entries tried, entries with a new sound
     S_LOG_ST_FAILED,         // file
     S_ORIGIN_SOUNDTEST,      // entry number
+    S_SET_HW, S_HW_AUTO, S_HW_N64, S_HW_ALECK64,
+    S_SET_GROUP_DIP,
+    S_NOTE_A64,
+    S_ROM_IS_ALECK64,
+    S_SET_A64_TESTMENU,
+    S_STATUS_TESTMENU,       // item
+    S_LOG_TESTMENU_FOUND,    // item, how reached, keys, entries, analysed
+    S_LOG_TESTMENU_NONE,
     S_COUNT
 };
 

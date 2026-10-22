@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/version.h"
 #include "engine/ripper.h"
 #include "engine/statefile.h"
 #include "engine/wav.h"
@@ -32,7 +33,7 @@ public:
     bool verbose = false;
     void on_log(const std::string& s) override
     {
-        if (!verbose && (s.compare(0, 8, "explore:") == 0 || s.compare(0, 11, "sound test:") == 0))
+        if (!verbose && (s.compare(0, 8, "explore:") == 0 || s.compare(0, 8, "analyse:") == 0 || s.compare(0, 11, "sound test:") == 0))
             return;
         std::lock_guard<std::mutex> lk(mu_);
         std::printf("  %s\n", s.c_str());
@@ -47,6 +48,14 @@ public:
                 return;
             last_entry_ = p.st_entry;
             std::printf("[%4ds] sound test entry %d (%s): songs %d, waiting %d\n", sec, p.st_entry, p.st_keys.c_str(), p.songs, p.pending);
+            std::fflush(stdout);
+            return;
+        }
+        if (p.st_phase == 3 && !p.finished) {
+            if (p.st_entry == last_entry_)
+                return;
+            last_entry_ = p.st_entry;
+            std::printf("[%4ds] Aleck64 test menu: trying item %d\n", sec, p.st_entry);
             std::fflush(stdout);
             return;
         }
@@ -71,8 +80,19 @@ public:
         std::printf("+ %-12s %s (+%.0fs fade)  %-7s", s.title.c_str(), format_time_short(s.length_seconds).c_str(), s.fade_seconds, kind);
         if (s.kind == SongKind::Looping)
             std::printf(" intro %.2fs loop %.2fs", s.intro_seconds, s.loop_seconds);
-        std::printf("  [%u Hz, heard at %.0fs%s%s]\n", s.sample_rate, s.found_at_seconds,
-                    s.hle_ok ? "" : ", needs LLE audio", s.stalls ? ", stalls" : "");
+        std::printf("  [%u Hz, heard at %.0fs%s%s%s]\n", s.sample_rate, s.found_at_seconds,
+                    s.hle_ok ? "" : ", needs LLE audio", s.stalls ? ", stalls" : "",
+                    s.foreign_hw ? ", touches Aleck64 hardware" : "");
+        std::fflush(stdout);
+    }
+    void on_test_menu(const SoundTestResult& r) override
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (r.controls_found)
+            std::printf("test menu: sound test at item %d (%s), keys %s: %d entries tried, %d analysed\n", r.menu_item,
+                        r.menu_keys.c_str(), r.keys.c_str(), r.entries, r.sounds);
+        else
+            std::printf("test menu: no sound test found%s\n", r.cancelled ? " (stopped)" : "");
         std::fflush(stdout);
     }
     void on_song_removed(int id) override
@@ -101,7 +121,7 @@ public:
 void usage()
 {
     std::printf(
-        "USF Maker (command line)\n"
+        "USF Maker v" USFM_VERSION_STRING " (command line)\n"
         "\n"
         "  usfmaker-cli <rom> [options]             find the music in a ROM and write a USF set\n"
         "  usfmaker-cli --render <usf> <wav> [sec]  play a .usf/.miniusf into a WAV file\n"
@@ -124,6 +144,10 @@ void usage()
         "  --4mb              emulate a console without Expansion Pak\n"
         "  --eeprom <4|16>    size of the cartridge EEPROM in kbit (default: by game)\n"
         "  --no-save-memory   explore without EEPROM / SRAM / FlashRAM in the cartridge\n"
+        "  --hardware <auto|n64|aleck64>  console to emulate while exploring (default auto:\n"
+        "                     Aleck64 for cartridges with a CIC-NUS-5101)\n"
+        "  --dips <hex>       Aleck64 DIP switches that are ON: bit 0 = SW1-1 ... bit 15 = SW2-8\n"
+        "  --no-test-menu     Aleck64: do not look for the sound test in the test menu first\n"
         "  --loops <n>        loops before the fade (default 2)\n"
         "  --fade <sec>       fade length for looping songs (default 10)\n"
         "  --seed <n>         change the sequence of automatic button presses\n"
@@ -231,6 +255,12 @@ int run(std::vector<std::string> args)
         else if (a == "--4mb") opt.rdram_size = 0x400000;
         else if (a == "--eeprom") opt.eeprom_kbit = std::atoi(next().c_str()) >= 16 ? 16 : 4;
         else if (a == "--no-save-memory") opt.save_memory = false;
+        else if (a == "--hardware") {
+            const std::string h = next();
+            opt.hardware = h == "n64" ? 1 : h == "aleck64" ? 2 : 0;
+        }
+        else if (a == "--dips") opt.aleck64_dips = (uint16_t)std::strtoul(next().c_str(), nullptr, 16);
+        else if (a == "--no-test-menu") opt.aleck64_test_menu = false;
         else if (a == "--loops") opt.loop_count = std::atoi(next().c_str());
         else if (a == "--fade") opt.fade_seconds = std::atof(next().c_str());
         else if (a == "--seed") opt.seed = std::strtoull(next().c_str(), nullptr, 0);

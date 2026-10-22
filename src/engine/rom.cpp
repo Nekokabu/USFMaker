@@ -37,9 +37,15 @@ static std::string trim_ascii(const uint8_t* p, size_t n)
 static const char* identify_cic(const uint8_t* rom_be)
 {
     // Same test the emulator core uses: the 64 bit sum of the IPL3 words.
-    uint64_t sum = 0;
-    for (size_t i = 0x40; i < 0x1000; i += 4)
+    uint64_t sum = 0, sum_c00 = 0;
+    for (size_t i = 0x40; i < 0x1000; i += 4) {
+        if (i == 0xC00)
+            sum_c00 = sum;
         sum += rd32be(rom_be + i);
+    }
+    // Aleck64: its IPL3 ends at 0xC00, the rest differs between games
+    if (sum == 0x000000A5F80BF620ULL || sum_c00 == 0x000000A5F80BF620ULL)
+        return "5101";
     switch (sum) {
     case 0x000000D057C85244ULL: return "6102";
     case 0x000000D0027FDF31ULL:
@@ -208,6 +214,7 @@ bool Rom::load_from_memory(Bytes data, std::string& err)
     }
     info_.cic = identify_cic(be_.data());
     info_.eeprom_16k = has_16k_eeprom(info_.game_code);
+    info_.aleck64 = info_.cic == "5101";
 
     size_t padded = (size_t)1 << 20;
     while (padded < be_.size())

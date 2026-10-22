@@ -31,6 +31,7 @@
 
 #include "engine/ripper.h"
 #include "engine/statefile.h"
+#include "engine/version.h"
 #include "player.h"
 #include "resource.h"
 #include "strings.h"
@@ -104,6 +105,9 @@ std::wstring keys_text(const std::string& keys)
         { L"D-Pad Right", L"十字キー右" }, { L"D-Pad Down", L"十字キー下" }, { L"D-Pad Left", L"十字キー左" }, { L"D-Pad Up", L"十字キー上" },
         { L"Stick Right", L"スティック右" }, { L"Stick Down", L"スティック下" },
         { L"C Right", L"C 右" }, { L"C Down", L"C 下" }, { L"START", L"スタート" },
+        { L"TEST", L"テストスイッチ" }, { L"SERVICE", L"サービスボタン" }, { L" x", L" ×" },
+        { L"Mahjong Kan", L"麻雀パネル カン" }, { L"Mahjong Pon", L"麻雀パネル ポン" }, { L"Mahjong Chi", L"麻雀パネル チー" },
+        { L"Mahjong Reach", L"麻雀パネル リーチ" }, { L"Mahjong Ron", L"麻雀パネル ロン" }, { L"Mahjong ", L"麻雀パネル " },
     };
     for (const auto& n : names) {
         const std::wstring en = n.en;
@@ -152,6 +156,15 @@ public:
     void on_progress(const RipProgress& p) override { PostMessageW(wnd, WM_APP_PROGRESS, 0, (LPARAM) new RipProgress(p)); }
     void on_song_added(const SongInfo& s) override { PostMessageW(wnd, WM_APP_SONG_ADDED, 0, (LPARAM) new SongInfo(s)); }
     void on_song_removed(int id) override { PostMessageW(wnd, WM_APP_SONG_REMOVED, (WPARAM)id, 0); }
+    void on_test_menu(const SoundTestResult& r) override
+    {
+        if (r.cancelled)
+            return;
+        std::wstring line = r.controls_found
+            ? fmt(T(S_LOG_TESTMENU_FOUND), r.menu_item, keys_text(r.menu_keys).c_str(), keys_text(r.keys).c_str(), r.entries, r.sounds)
+            : std::wstring(T(S_LOG_TESTMENU_NONE));
+        PostMessageW(wnd, WM_APP_LOG, 0, (LPARAM) new std::wstring(line));
+    }
 };
 
 struct App {
@@ -284,6 +297,11 @@ void list_fill_row(int row, const SongInfo& s)
             note += L" / ";
         note += T(S_NOTE_LLE);
     }
+    if (s.foreign_hw) {
+        if (!note.empty())
+            note += L" / ";
+        note += T(S_NOTE_A64);
+    }
     list_set(row, 6, note);
 }
 
@@ -352,6 +370,20 @@ void stop_playback()
 }
 
 // ----------------------------------------------------------------- ROM
+// The line under the ROM name; says when the game runs as an Aleck64.
+void show_rom_info()
+{
+    if (!g.rom)
+        return;
+    const RomInfo& ri = g.rom->info();
+    std::wstring text = fmt(T(S_ROM_INFO), rom_name_text(ri.internal_name).c_str(), widen(ri.game_code).c_str(), widen(ri.cic).c_str(),
+                            ri.pal ? L"PAL" : L"NTSC", (double)ri.size / 1048576.0);
+    const bool a64 = g.opt.hardware == 2 || (g.opt.hardware == 0 && ri.aleck64);
+    if (a64)
+        text += T(S_ROM_IS_ALECK64);
+    SetWindowTextW(ctl(IDC_ROM_INFO), text.c_str());
+}
+
 bool load_rom(const std::wstring& path)
 {
     if (g.ripping || g.importing) {
@@ -380,12 +412,8 @@ bool load_rom(const std::wstring& path)
     ListView_DeleteAllItems(ctl(IDC_LIST));
     g.order_by_id.clear();
 
-    const RomInfo& ri = rom->info();
     SetWindowTextW(ctl(IDC_ROM_EDIT), path.c_str());
-    SetWindowTextW(ctl(IDC_ROM_INFO),
-                   fmt(T(S_ROM_INFO), rom_name_text(ri.internal_name).c_str(), widen(ri.game_code).c_str(), widen(ri.cic).c_str(),
-                       ri.pal ? L"PAL" : L"NTSC", (double)ri.size / 1048576.0)
-                       .c_str());
+    show_rom_info();
     SetWindowTextW(ctl(IDC_GAME_EDIT), g.rom_path.stem().wstring().c_str());
     SendMessageW(ctl(IDC_PROGRESS), PBM_SETPOS, 0, 0);
     set_status(T(S_STATUS_READY));
@@ -480,7 +508,9 @@ void on_progress(const RipProgress& p)
         const int pos = (int)std::min(1000.0, p.elapsed_seconds * 1000.0 / p.budget_seconds);
         SendMessageW(ctl(IDC_PROGRESS), PBM_SETPOS, pos, 0);
     }
-    if (p.st_phase == 1 && !g.stopping) {
+    if (p.st_phase == 3 && !g.stopping) {
+        set_status(fmt(T(S_STATUS_TESTMENU), p.st_entry));
+    } else if (p.st_phase == 1 && !g.stopping) {
         set_status(T(S_STATUS_ST_PROBE));
     } else if (p.st_phase == 2 && !g.stopping) {
         set_status(fmt(T(S_STATUS_ST_WALK), p.st_entry, keys_text(p.st_keys).c_str(), p.songs, p.pending));
@@ -818,6 +848,7 @@ INT_PTR CALLBACK settings_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
             { IDC_SET_EXPANSION, S_SET_EXPANSION }, { IDC_SET_IDLE_LABEL, S_SET_IDLE }, { IDC_SET_THREADS_LABEL, S_SET_THREADS },
             { IDC_SET_SEED_LABEL, S_SET_SEED }, { IDC_SET_LOOPS_LABEL, S_SET_LOOPS }, { IDC_SET_FADE_LABEL, S_SET_FADE },
             { IDC_SET_DEFLEN_LABEL, S_SET_DEFLEN }, { IDC_SET_MAXLEN_LABEL, S_SET_MAXLEN }, { IDC_SET_FULLROM, S_SET_FULLROM },
+            { IDC_SET_HW_LABEL, S_SET_HW }, { IDC_SET_GROUP_DIP, S_SET_GROUP_DIP }, { IDC_SET_A64_TESTMENU, S_SET_A64_TESTMENU },
             { IDOK, S_BTN_OK }, { IDCANCEL, S_BTN_CANCEL },
         };
         for (const auto& l : labels)
@@ -831,6 +862,16 @@ INT_PTR CALLBACK settings_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
         set_int(dlg, IDC_SET_DEFLEN, (int)g.opt.default_length_seconds);
         set_int(dlg, IDC_SET_MAXLEN, (int)g.opt.max_render_seconds);
         CheckDlgButton(dlg, IDC_SET_FULLROM, g.full_rom ? BST_CHECKED : BST_UNCHECKED);
+        {
+            HWND hw = GetDlgItem(dlg, IDC_SET_HW);
+            SendMessageW(hw, CB_ADDSTRING, 0, (LPARAM)T(S_HW_AUTO));
+            SendMessageW(hw, CB_ADDSTRING, 0, (LPARAM)T(S_HW_N64));
+            SendMessageW(hw, CB_ADDSTRING, 0, (LPARAM)T(S_HW_ALECK64));
+            SendMessageW(hw, CB_SETCURSEL, (WPARAM)std::min(std::max(g.opt.hardware, 0), 2), 0);
+            for (int i = 0; i < 16; i++)
+                CheckDlgButton(dlg, IDC_SET_DIP0 + i, (g.opt.aleck64_dips & (1u << i)) ? BST_CHECKED : BST_UNCHECKED);
+            CheckDlgButton(dlg, IDC_SET_A64_TESTMENU, g.opt.aleck64_test_menu ? BST_CHECKED : BST_UNCHECKED);
+        }
         return TRUE;
     }
     case WM_COMMAND:
@@ -844,6 +885,17 @@ INT_PTR CALLBACK settings_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM)
             g.opt.default_length_seconds = get_int(dlg, IDC_SET_DEFLEN, 10, 3600, 180);
             g.opt.max_render_seconds = get_int(dlg, IDC_SET_MAXLEN, 60, 3600, 480);
             g.full_rom = IsDlgButtonChecked(dlg, IDC_SET_FULLROM) == BST_CHECKED;
+            {
+                const int hw = (int)SendDlgItemMessageW(dlg, IDC_SET_HW, CB_GETCURSEL, 0, 0);
+                g.opt.hardware = (hw >= 0 && hw <= 2) ? hw : 0;
+                uint16_t dips = 0;
+                for (int i = 0; i < 16; i++)
+                    if (IsDlgButtonChecked(dlg, IDC_SET_DIP0 + i) == BST_CHECKED)
+                        dips |= (uint16_t)(1u << i);
+                g.opt.aleck64_dips = dips;
+                g.opt.aleck64_test_menu = IsDlgButtonChecked(dlg, IDC_SET_A64_TESTMENU) == BST_CHECKED;
+            }
+            show_rom_info();
             EndDialog(dlg, IDOK);
             return TRUE;
         }
@@ -1307,7 +1359,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     wc.lpszClassName = L"USFMakerMainWindow";
     RegisterClassExW(&wc);
 
-    HWND wnd = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_ACCEPTFILES, wc.lpszClassName, T(S_APP_TITLE), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+    const std::wstring title = std::wstring(T(S_APP_TITLE)) + L" v" + widen(USFM_VERSION_STRING);
+    HWND wnd = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_ACCEPTFILES, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700, nullptr, nullptr, inst, nullptr);
     if (!wnd)
         return 1;
